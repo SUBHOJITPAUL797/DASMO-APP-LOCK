@@ -1,0 +1,57 @@
+name: Build & Publish Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    name: Build Signed Release APK
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew || true
+
+      - name: Build Release APK
+        run: |
+          if [ -f "./gradlew" ]; then
+            ./gradlew assembleRelease --stacktrace
+          else
+            gradle assembleRelease --stacktrace
+          fi
+
+      - name: Locate and Rename APK
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          mkdir -p release-artifacts
+          find app/build/outputs/apk/release/ -name "*.apk" -exec cp {} "release-artifacts/dasmo-applock-${VERSION}.apk" \;
+          cd release-artifacts
+          sha256sum "dasmo-applock-${VERSION}.apk" > checksums.txt
+          cat checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "DASMO Lock ${{ github.ref_name }} — Privacy Guard, AES-256 Vault & In-App Updates"
+          body_path: RELEASE.md
+          draft: false
+          prerelease: false
+          files: |
+            release-artifacts/*.apk
+            release-artifacts/checksums.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

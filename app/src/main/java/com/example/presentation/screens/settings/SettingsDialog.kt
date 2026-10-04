@@ -17,12 +17,22 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import com.example.BuildConfig
 import com.example.util.SecurePreferences
+import com.example.util.update.AppUpdateInfo
+import com.example.util.update.AppUpdateManager
+import com.example.util.update.UpdateStatus
+import kotlinx.coroutines.launch
+import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsDialog(onDismiss: () -> Unit, context: Context) {
     var activeTab by remember { mutableStateOf(0) }
+    val updateManager = remember { AppUpdateManager.getInstance() }
+    var updateState by remember { mutableStateOf<UpdateStatus>(UpdateStatus.Idle) }
+    val scope = rememberCoroutineScope()
+
 
     val securePrefs = remember { SecurePreferences(context) }
     
@@ -102,7 +112,13 @@ fun SettingsDialog(onDismiss: () -> Unit, context: Context) {
                         onClick = { activeTab = 3 },
                         text = { Text("Auto-Lock") }
                     )
+                    Tab(
+                        selected = activeTab == 4,
+                        onClick = { activeTab = 4 },
+                        text = { Text("Updates") }
+                    )
                 }
+
             }
         },
         text = {
@@ -384,9 +400,180 @@ fun SettingsDialog(onDismiss: () -> Unit, context: Context) {
                             }
                         }
                     }
+
+                    4 -> {
+                        // Software Updates Tab
+                        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(16.dp),
+                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                            ) {
+                                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text("DASMO LOCK", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+                                        Surface(
+                                            shape = RoundedCornerShape(8.dp),
+                                            color = MaterialTheme.colorScheme.primaryContainer
+                                        ) {
+                                            Text(
+                                                "v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE})",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontWeight = FontWeight.Bold,
+                                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                            )
+                                        }
+                                    }
+                                    Text(
+                                        "Connected: ${AppUpdateManager.GITHUB_OWNER}/${AppUpdateManager.GITHUB_REPO}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                            }
+
+                            when (val status = updateState) {
+                                is UpdateStatus.Idle -> {
+                                    Text("Check GitHub releases to keep your app lock engine updated.", style = MaterialTheme.typography.bodySmall)
+                                    Button(
+                                        onClick = {
+                                            scope.launch {
+                                                updateState = UpdateStatus.Checking
+                                                updateState = updateManager.checkForUpdate(context)
+                                            }
+                                        },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        shape = RoundedCornerShape(12.dp)
+                                    ) {
+                                        Text("Check for Updates")
+                                    }
+                                }
+
+                                is UpdateStatus.Checking -> {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
+                                        Text("Connecting to GitHub Releases API...", style = MaterialTheme.typography.bodySmall)
+                                    }
+                                }
+
+                                is UpdateStatus.UpToDate -> {
+                                    Text(
+                                        "✓ App is up to date (v${status.currentVersion})",
+                                        fontWeight = FontWeight.Bold,
+                                        color = androidx.compose.ui.graphics.Color(0xFF16A34A)
+                                    )
+                                    FilledTonalButton(
+                                        onClick = {
+                                            scope.launch {
+                                                updateState = UpdateStatus.Checking
+                                                updateState = updateManager.checkForUpdate(context)
+                                            }
+                                        },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        shape = RoundedCornerShape(12.dp)
+                                    ) {
+                                        Text("Re-check")
+                                    }
+                                }
+
+                                is UpdateStatus.UpdateAvailable -> {
+                                    val info = status.updateInfo
+                                    Text("✨ New Version Available: v${info.latestVersion}", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                                    Text("Size: ${info.formattedSize}", style = MaterialTheme.typography.labelSmall)
+                                    Surface(
+                                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                        shape = RoundedCornerShape(10.dp),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Text(
+                                            info.changelog.take(200) + if (info.changelog.length > 200) "..." else "",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            modifier = Modifier.padding(10.dp)
+                                        )
+                                    }
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        Button(
+                                            onClick = {
+                                                scope.launch {
+                                                    try {
+                                                        updateState = UpdateStatus.Downloading(info, 0, 0, info.apkSizeBytes)
+                                                        val apk = updateManager.downloadApk(context, info) {
+                                                            updateState = it
+                                                        }
+                                                        updateState = UpdateStatus.ReadyToInstall(info, apk)
+                                                        updateManager.installApk(context, apk)
+                                                    } catch (e: Exception) {
+                                                        updateState = UpdateStatus.Error(e.localizedMessage ?: "Download failed")
+                                                    }
+                                                }
+                                            },
+                                            modifier = Modifier.weight(1f),
+                                            shape = RoundedCornerShape(12.dp)
+                                        ) {
+                                            Text("Update Now (APK)")
+                                        }
+                                        OutlinedButton(
+                                            onClick = { updateManager.openReleaseInBrowser(context, info.htmlUrl) },
+                                            shape = RoundedCornerShape(12.dp)
+                                        ) {
+                                            Text("View")
+                                        }
+                                    }
+                                }
+
+                                is UpdateStatus.Downloading -> {
+                                    Text("Downloading v${status.updateInfo.latestVersion}... ${status.progressPercent}%", fontWeight = FontWeight.Bold)
+                                    LinearProgressIndicator(
+                                        progress = { status.progressPercent / 100f },
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                }
+
+                                is UpdateStatus.ReadyToInstall -> {
+                                    Text("✅ Download Complete!", fontWeight = FontWeight.Bold)
+                                    Button(
+                                        onClick = { updateManager.installApk(context, status.apkFile) },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        shape = RoundedCornerShape(12.dp)
+                                    ) {
+                                        Text("Install APK Now")
+                                    }
+                                }
+
+                                is UpdateStatus.Error -> {
+                                    Text("⚠️ ${status.message}", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        FilledTonalButton(
+                                            onClick = {
+                                                scope.launch {
+                                                    updateState = UpdateStatus.Checking
+                                                    updateState = updateManager.checkForUpdate(context)
+                                                }
+                                            },
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Text("Retry")
+                                        }
+                                        OutlinedButton(onClick = { updateManager.openReleaseInBrowser(context, AppUpdateManager.REPO_RELEASES_WEB_URL) }) {
+                                            Text("GitHub")
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         },
+
         confirmButton = {
             Button(onClick = {
                 if (pin.isNotEmpty()) {
