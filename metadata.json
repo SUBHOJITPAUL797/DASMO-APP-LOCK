@@ -1,0 +1,6 @@
+{
+  "name": "DASMO LOCK",
+  "description": "Privacy-first app locker with AES-256 vault and intruder detection.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
