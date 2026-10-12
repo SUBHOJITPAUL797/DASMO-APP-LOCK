@@ -124,18 +124,25 @@ class AppLockService : Service() {
         currentForegroundPackage = targetPackageName
 
         val securePrefs = com.example.util.SecurePreferences(this)
+        val isUninstallProtection = securePrefs.getString("uninstall_protection", "false") == "true"
+        val isPackageInstaller = isUninstallProtection && isPackageInstallerApp(targetPackageName)
+
         val hiddenAppsStr = securePrefs.getString("hidden_apps", "") ?: ""
         val hiddenApps = hiddenAppsStr.split(",").filter { it.isNotEmpty() }.toSet()
         val isHidden = hiddenApps.contains(targetPackageName)
         val isLocked = cachedLockedPackages.containsKey(targetPackageName)
 
-        if (isLocked || isHidden) {
-            val appLabel = cachedLockedPackages[targetPackageName] ?: try {
-                val pm = packageManager
-                val info = pm.getApplicationInfo(targetPackageName, 0)
-                pm.getApplicationLabel(info).toString()
-            } catch (e: Exception) {
-                targetPackageName
+        if (isLocked || isHidden || isPackageInstaller) {
+            val appLabel = if (isPackageInstaller) {
+                "Uninstall Protection"
+            } else {
+                cachedLockedPackages[targetPackageName] ?: try {
+                    val pm = packageManager
+                    val info = pm.getApplicationInfo(targetPackageName, 0)
+                    pm.getApplicationLabel(info).toString()
+                } catch (e: Exception) {
+                    targetPackageName
+                }
             }
 
             val isUnlocked = unlockedApps.contains(targetPackageName)
@@ -149,6 +156,18 @@ class AppLockService : Service() {
                 launchLockScreen(targetPackageName, appLabel, isHidden)
             }
         }
+    }
+
+    private fun isPackageInstallerApp(pkg: String): Boolean {
+        val low = pkg.lowercase()
+        return low == "com.android.packageinstaller" ||
+               low == "com.google.android.packageinstaller" ||
+               low == "com.samsung.android.packageinstaller" ||
+               low == "com.miui.packageinstaller" ||
+               low == "com.coloros.packageinstaller" ||
+               low == "com.oppo.packageinstaller" ||
+               low == "com.vivo.packageinstaller" ||
+               low == "com.sec.android.app.samsungapps"
     }
 
     private fun launchLockScreen(targetPackage: String, appLabel: String, isHidden: Boolean) {

@@ -2,9 +2,7 @@ package com.example.presentation.screens.vault
 
 import android.content.Context
 import android.graphics.BitmapFactory
-import android.widget.MediaController
 import android.widget.Toast
-import android.widget.VideoView
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.*
@@ -12,6 +10,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -22,17 +22,21 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Article
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -41,18 +45,28 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.media3.common.MediaItem
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.ByteArrayDataSource
+import androidx.media3.exoplayer.source.ProgressiveMediaSource
+import androidx.media3.ui.PlayerView
 import com.example.util.CryptoManager
 import com.example.util.MasterKeyManager
 import com.example.util.SecurePreferences
 import com.example.util.VaultRestoreManager
+import com.example.util.VaultStorageManager
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+private fun Long.toMb(): String = "%.1f MB".format(this / 1_048_576.0)
 
 @Composable
 fun EncryptedImageThumbnail(file: File) {
@@ -62,9 +76,7 @@ fun EncryptedImageThumbnail(file: File) {
             try {
                 val encryptedBytes = file.readBytes()
                 val decryptedBytes = CryptoManager.decryptBytes(encryptedBytes)
-                val options = BitmapFactory.Options().apply {
-                    inSampleSize = 4
-                }
+                val options = BitmapFactory.Options().apply { inSampleSize = 4 }
                 val decBitmap = BitmapFactory.decodeByteArray(decryptedBytes, 0, decryptedBytes.size, options)
                 bitmap = decBitmap?.asImageBitmap()
             } catch (e: Exception) {
@@ -86,20 +98,25 @@ fun EncryptedImageThumbnail(file: File) {
                 .background(MaterialTheme.colorScheme.surfaceVariant),
             contentAlignment = Alignment.Center
         ) {
-            Icon(Icons.Default.Image, contentDescription = "Loading Image", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
         }
     }
 }
 
+// ─── Crypto Progress Modal ─────────────────────────────────────────────────────
+
 /**
- * Animated Modal Dialog showing cryptographic progress (pulsing shield, rotating neon ring, progress bar).
+ * Modal showing real-time encryption/decryption progress.
+ * Displays animated shield + live percentage, MB counter, and file name.
  */
 @Composable
 fun CryptoProgressModal(
     title: String,
     currentStepText: String,
     currentFileText: String,
-    progressFraction: Float
+    progressFraction: Float,
+    bytesProcessed: Long = 0L,
+    totalBytes: Long = 0L
 ) {
     val infiniteTransition = rememberInfiniteTransition(label = "crypto_infinite")
     val rotationAngle by infiniteTransition.animateFloat(
@@ -121,29 +138,34 @@ fun CryptoProgressModal(
         label = "pulse"
     )
 
+    val percent = (progressFraction * 100).toInt().coerceIn(0, 100)
+    val progressAnim by animateFloatAsState(
+        targetValue = progressFraction.coerceIn(0f, 1f),
+        animationSpec = tween(200),
+        label = "progressAnim"
+    )
+
     Dialog(
         onDismissRequest = {},
         properties = DialogProperties(dismissOnBackPress = false, dismissOnClickOutside = false)
     ) {
         Card(
             modifier = Modifier
-                .fillMaxWidth(0.9f)
-                .padding(16.dp),
+                .fillMaxWidth(0.92f)
+                .padding(8.dp),
             shape = RoundedCornerShape(24.dp),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(16.dp)
+                verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
-                // Pulsing Shield with Neon Rotating Ring
-                Box(
-                    modifier = Modifier.size(90.dp),
-                    contentAlignment = Alignment.Center
-                ) {
+                // Pulsing shield icon with neon ring
+                Box(modifier = Modifier.size(90.dp), contentAlignment = Alignment.Center) {
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
@@ -151,12 +173,7 @@ fun CryptoProgressModal(
                             .border(
                                 width = 3.dp,
                                 brush = Brush.sweepGradient(
-                                    colors = listOf(
-                                        Color(0xFF38BDF8),
-                                        Color(0xFFA855F7),
-                                        Color(0xFFEC4899),
-                                        Color(0xFF38BDF8)
-                                    )
+                                    listOf(Color(0xFF38BDF8), Color(0xFFA855F7), Color(0xFFEC4899), Color(0xFF38BDF8))
                                 ),
                                 shape = CircleShape
                             )
@@ -164,9 +181,7 @@ fun CryptoProgressModal(
                     Surface(
                         shape = CircleShape,
                         color = MaterialTheme.colorScheme.primaryContainer,
-                        modifier = Modifier
-                            .size(68.dp)
-                            .scale(pulseScale)
+                        modifier = Modifier.size(68.dp).scale(pulseScale)
                     ) {
                         Box(contentAlignment = Alignment.Center) {
                             Icon(
@@ -179,12 +194,7 @@ fun CryptoProgressModal(
                     }
                 }
 
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    textAlign = TextAlign.Center
-                )
+                Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
 
                 if (currentStepText.isNotBlank()) {
                     Text(
@@ -206,32 +216,270 @@ fun CryptoProgressModal(
                     )
                 }
 
-                LinearProgressIndicator(
-                    progress = { progressFraction.coerceIn(0f, 1f) },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(8.dp),
-                    color = MaterialTheme.colorScheme.primary,
-                    trackColor = MaterialTheme.colorScheme.surfaceVariant
-                )
+                // Real progress bar
+                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    LinearProgressIndicator(
+                        progress = { progressAnim },
+                        modifier = Modifier.fillMaxWidth().height(10.dp).clip(RoundedCornerShape(5.dp)),
+                        color = MaterialTheme.colorScheme.primary,
+                        trackColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        if (totalBytes > 0) {
+                            Text(
+                                text = "${bytesProcessed.toMb()} / ${totalBytes.toMb()}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        } else {
+                            Spacer(Modifier.width(1.dp))
+                        }
+                        Text(
+                            text = "$percent%",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
             }
         }
     }
 }
+
+// ─── Full-screen image viewer with pinch-zoom & double-tap zoom ─────────────────
+
+@Composable
+fun FullScreenImageViewer(
+    bitmap: ImageBitmap,
+    fileName: String,
+    onRestore: () -> Unit,
+    onDelete: () -> Unit,
+    onClose: () -> Unit
+) {
+    var scale by remember { mutableStateOf(1f) }
+    var offsetX by remember { mutableStateOf(0f) }
+    var offsetY by remember { mutableStateOf(0f) }
+
+    Dialog(
+        onDismissRequest = onClose,
+        properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+        ) {
+            Image(
+                bitmap = bitmap,
+                contentDescription = fileName,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer(
+                        scaleX = scale,
+                        scaleY = scale,
+                        translationX = offsetX,
+                        translationY = offsetY
+                    )
+                    .pointerInput(Unit) {
+                        detectTapGestures(
+                            onDoubleTap = {
+                                if (scale > 1.5f) {
+                                    scale = 1f
+                                    offsetX = 0f
+                                    offsetY = 0f
+                                } else {
+                                    scale = 3f
+                                }
+                            }
+                        )
+                    }
+                    .pointerInput(Unit) {
+                        detectTransformGestures { _, pan, zoom, _ ->
+                            scale = (scale * zoom).coerceIn(1f, 6f)
+                            if (scale > 1f) {
+                                offsetX += pan.x
+                                offsetY += pan.y
+                            } else {
+                                offsetX = 0f
+                                offsetY = 0f
+                            }
+                        }
+                    }
+            )
+
+            // Top control bar with translucent gradient
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(Color.Black.copy(alpha = 0.75f), Color.Transparent)
+                        )
+                    )
+                    .padding(horizontal = 8.dp, vertical = 12.dp)
+                    .align(Alignment.TopCenter),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                IconButton(onClick = onClose) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Close", tint = Color.White)
+                }
+                Text(
+                    text = fileName.removeSuffix(".enc"),
+                    color = Color.White,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    modifier = Modifier.weight(1f).padding(horizontal = 8.dp)
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = onRestore) {
+                        Icon(Icons.Default.Restore, contentDescription = "Restore to Gallery", tint = Color(0xFF38BDF8))
+                    }
+                    IconButton(onClick = onDelete) {
+                        Icon(Icons.Default.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.error)
+                    }
+                }
+            }
+
+            // Bottom zoom hint
+            if (scale == 1f) {
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = Color.Black.copy(alpha = 0.5f),
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 24.dp)
+                ) {
+                    Text(
+                        text = "Double-tap or pinch to zoom",
+                        color = Color.White.copy(alpha = 0.7f),
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+// ─── ExoPlayer full-screen video viewer ──────────────────────────────────────
+
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+@Composable
+fun FullScreenVideoViewer(
+    decryptedBytes: ByteArray,
+    fileName: String,
+    onRestore: () -> Unit,
+    onDelete: () -> Unit,
+    onClose: () -> Unit
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+
+    val exoPlayer = remember {
+        val dataSourceFactory = DataSource.Factory { ByteArrayDataSource(decryptedBytes) }
+        val safeUri = "bytes://vault_video/${fileName.removeSuffix(".enc")}"
+        val mediaSource = ProgressiveMediaSource.Factory(dataSourceFactory)
+            .createMediaSource(MediaItem.fromUri(safeUri))
+        ExoPlayer.Builder(context)
+            .setSeekForwardIncrementMs(10000)
+            .setSeekBackIncrementMs(10000)
+            .build().apply {
+                setMediaSource(mediaSource)
+                prepare()
+                playWhenReady = true
+            }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose { exoPlayer.release() }
+    }
+
+    Dialog(
+        onDismissRequest = onClose,
+        properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+        ) {
+            AndroidView(
+                factory = { ctx ->
+                    PlayerView(ctx).apply {
+                        player = exoPlayer
+                        useController = true
+                        setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS)
+                        setShowFastForwardButton(true)
+                        setShowRewindButton(true)
+                        setShowNextButton(false)
+                        setShowPreviousButton(false)
+                        resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
+                    }
+                },
+                modifier = Modifier
+                    .fillMaxSize()
+                    .align(Alignment.Center)
+            )
+
+            // Top control bar with translucent gradient
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(Color.Black.copy(alpha = 0.75f), Color.Transparent)
+                        )
+                    )
+                    .padding(horizontal = 8.dp, vertical = 12.dp)
+                    .align(Alignment.TopCenter),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                IconButton(onClick = onClose) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Close", tint = Color.White)
+                }
+                Text(
+                    text = fileName.removeSuffix(".enc"),
+                    color = Color.White,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    modifier = Modifier.weight(1f).padding(horizontal = 8.dp)
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = onRestore) {
+                        Icon(Icons.Default.Restore, contentDescription = "Restore to Gallery", tint = Color(0xFF38BDF8))
+                    }
+                    IconButton(onClick = onDelete) {
+                        Icon(Icons.Default.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.error)
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ─── Main Screen ──────────────────────────────────────────────────────────────
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
     val coroutineScope = rememberCoroutineScope()
     val securePrefs = remember { SecurePreferences(context) }
-    
-    // Check if user has initialized their master PIN
+
+    // First-time setup states
     var hasMasterPin by remember { mutableStateOf(securePrefs.hasMasterPin()) }
-    var setupStep by remember { mutableStateOf(0) } // 0: Enter New PIN, 1: Confirm PIN, 2: Security Recovery
+    var setupStep by remember { mutableStateOf(0) }
     var setupFirstPin by remember { mutableStateOf("") }
     var setupConfirmPin by remember { mutableStateOf("") }
     var setupError by remember { mutableStateOf<String?>(null) }
-    
+
     val defaultQuestions = listOf(
         "What was the name of your first school?",
         "What is your mother's maiden name?",
@@ -243,6 +491,7 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
     var setupAnswer by remember { mutableStateOf("") }
     var isQuestionDropdownExpanded by remember { mutableStateOf(false) }
 
+    // Unlock states
     var isUnlocked by remember { mutableStateOf(false) }
     var isDecoyMode by remember { mutableStateOf(false) }
     var enteredPin by remember { mutableStateOf("") }
@@ -250,77 +499,97 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
     var showRecoveryDialog by remember { mutableStateOf(false) }
     var recoveryInput by remember { mutableStateOf("") }
     var recoveryError by remember { mutableStateOf<String?>(null) }
-    var isKeypadBouncing by remember { mutableStateOf(false) }
 
+    // File list
     var secureFiles by remember { mutableStateOf<List<File>>(emptyList()) }
     var selectedFile by remember { mutableStateOf<File?>(null) }
     var decryptedContent by remember { mutableStateOf<String?>(null) }
-    
-    // Multi-Selection state
+
+    // Multi-selection
     var isSelectionMode by remember { mutableStateOf(false) }
     var selectedFilePaths by remember { mutableStateOf<Set<String>>(emptySet()) }
     var showBatchDeleteConfirm by remember { mutableStateOf(false) }
 
-    // Progress Dialog States
+    // Progress dialog states (real progress)
     var isProgressVisible by remember { mutableStateOf(false) }
     var progressTitle by remember { mutableStateOf("") }
     var progressStepText by remember { mutableStateOf("") }
     var progressFileText by remember { mutableStateOf("") }
     var progressFraction by remember { mutableStateOf(0f) }
+    var progressBytesProcessed by remember { mutableStateOf(0L) }
+    var progressTotalBytes by remember { mutableStateOf(0L) }
 
+    // Note creation
     var showCreateDialog by remember { mutableStateOf(false) }
     var newFileName by remember { mutableStateOf("") }
     var newFileContent by remember { mutableStateOf("") }
     var saveError by remember { mutableStateOf<String?>(null) }
-    
+
+    // Media preview
+    var activeTab by remember { mutableStateOf(0) }
+    var decryptedImageBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
+    var decryptedVideoBytes by remember { mutableStateOf<ByteArray?>(null) }
+    var isMediaLoading by remember { mutableStateOf(false) }
+    var showFullScreenViewer by remember { mutableStateOf(false) }
+
     val dateFormatter = remember { SimpleDateFormat("MMM dd, yyyy HH:mm", Locale.getDefault()) }
     val correctPin = remember(hasMasterPin) { securePrefs.getString("app_pin", "") }
     val decoyPin = remember { securePrefs.getString("decoy_pin", "") }
 
     fun getVaultDir(): File {
-        val dirName = if (isDecoyMode) "decoy_vault" else "secure_vault"
-        val dir = context.getDir(dirName, Context.MODE_PRIVATE)
-        if (!dir.exists()) dir.mkdirs()
-
+        val dir = VaultStorageManager.getVaultDirectory(context, isDecoyMode)
         if (isDecoyMode) {
             val existing = dir.listFiles()?.filter { it.name.endsWith(".enc") }
             if (existing.isNullOrEmpty()) {
                 try {
-                    val note1 = File(dir, "Weekly Grocery List.enc")
-                    note1.writeText(CryptoManager.encrypt("1. Milk (Whole)\n2. Eggs (Dozen)\n3. Brown Bread\n4. Apples & Oranges\n5. Green Tea"), Charsets.UTF_8)
-                    val note2 = File(dir, "Workout Plan.enc")
-                    note2.writeText(CryptoManager.encrypt("Mon: Chest & Triceps\nWed: Back & Biceps\nFri: Legs & Core\nSun: 5km morning run"), Charsets.UTF_8)
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
+                    File(dir, "Weekly Grocery List.enc").writeText(
+                        CryptoManager.encrypt("1. Milk\n2. Eggs\n3. Brown Bread\n4. Apples\n5. Green Tea"), Charsets.UTF_8)
+                    File(dir, "Workout Plan.enc").writeText(
+                        CryptoManager.encrypt("Mon: Chest & Triceps\nWed: Back & Biceps\nFri: Legs & Core"), Charsets.UTF_8)
+                } catch (e: Exception) { e.printStackTrace() }
             }
         }
         return dir
     }
 
-    fun loadSecureFiles() {
-        val dir = getVaultDir()
-        secureFiles = dir.listFiles()?.toList()?.filter { it.name.endsWith(".enc") }?.sortedByDescending { it.lastModified() } ?: emptyList()
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) {
+            VaultStorageManager.migrateLegacyInternalStorage(context)
+        }
     }
 
-    var activeTab by remember { mutableStateOf(0) } // 0: Notes, 1: Photos, 2: Videos
-    var decryptedImageBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
-    var decryptedVideoFile by remember { mutableStateOf<File?>(null) }
+    fun loadSecureFiles() {
+        val dir = getVaultDir()
+        secureFiles = dir.listFiles()
+            ?.filter { it.name.endsWith(".enc") }
+            ?.sortedByDescending { it.lastModified() }
+            ?: emptyList()
+    }
 
-    // Multi-photo importer
+    // ── Photo importer with real byte-level progress ───────────────────────────
     val photosPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetMultipleContents()
     ) { uris ->
         if (uris.isNullOrEmpty()) return@rememberLauncherForActivityResult
         coroutineScope.launch(Dispatchers.IO) {
             val total = uris.size
+            val contentResolver = context.contentResolver
+            val dir = getVaultDir()
+
+            // Pre-calculate total bytes for overall progress
+            val fileSizes = uris.map { uri ->
+                contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize } ?: 0L
+            }
+            val grandTotal = fileSizes.sum()
+            var grandProcessed = 0L
+
             withContext(Dispatchers.Main) {
                 isProgressVisible = true
                 progressTitle = "Encrypting Photos"
                 progressFraction = 0f
+                progressBytesProcessed = 0L
+                progressTotalBytes = grandTotal
             }
-            val contentResolver = context.contentResolver
-            val dir = getVaultDir()
 
             uris.forEachIndexed { index, uri ->
                 try {
@@ -330,27 +599,35 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
                         if (c.moveToFirst()) {
                             val nameIndex = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
                             if (nameIndex != -1) {
-                                val originalName = c.getString(nameIndex)
-                                if (originalName.isNotEmpty()) fileName = originalName
+                                val original = c.getString(nameIndex)
+                                if (original.isNotEmpty()) fileName = original
                             }
                         }
                     }
-                    if (!fileName.endsWith(".enc", ignoreCase = true)) {
-                        fileName = "$fileName.enc"
-                    }
+                    if (!fileName.endsWith(".enc", ignoreCase = true)) fileName = "$fileName.enc"
+
+                    val fileSize = fileSizes[index]
+                    val baseGrandProcessed = grandProcessed
 
                     withContext(Dispatchers.Main) {
-                        progressStepText = "Encrypting file ${index + 1} of $total"
+                        progressStepText = "File ${index + 1} of $total"
                         progressFileText = fileName.removeSuffix(".enc")
-                        progressFraction = (index + 1f) / total
                     }
 
                     val inputStream = contentResolver.openInputStream(uri)
-                    val bytes = inputStream?.readBytes()
-                    if (bytes != null && bytes.isNotEmpty()) {
-                        val encryptedBytes = CryptoManager.encryptBytes(bytes)
-                        val targetFile = File(dir, fileName)
-                        targetFile.writeBytes(encryptedBytes)
+                    if (inputStream != null) {
+                        val encryptedBytes = CryptoManager.encryptBytesWithProgress(
+                            inputStream = inputStream,
+                            totalBytes = fileSize
+                        ) { bytesRead, _ ->
+                            val currentGrand = baseGrandProcessed + bytesRead
+                            coroutineScope.launch(Dispatchers.Main) {
+                                progressBytesProcessed = currentGrand
+                                progressFraction = if (grandTotal > 0) currentGrand.toFloat() / grandTotal else (index + 1f) / total
+                            }
+                        }
+                        File(dir, fileName).writeBytes(encryptedBytes)
+                        grandProcessed += fileSize
                     }
                 } catch (e: Exception) {
                     e.printStackTrace()
@@ -365,20 +642,29 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
         }
     }
 
-    // Multi-video importer
+    // ── Video importer with real byte-level progress ───────────────────────────
     val videosPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetMultipleContents()
     ) { uris ->
         if (uris.isNullOrEmpty()) return@rememberLauncherForActivityResult
         coroutineScope.launch(Dispatchers.IO) {
             val total = uris.size
+            val contentResolver = context.contentResolver
+            val dir = getVaultDir()
+
+            val fileSizes = uris.map { uri ->
+                contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize } ?: 0L
+            }
+            val grandTotal = fileSizes.sum()
+            var grandProcessed = 0L
+
             withContext(Dispatchers.Main) {
                 isProgressVisible = true
                 progressTitle = "Encrypting Videos"
                 progressFraction = 0f
+                progressBytesProcessed = 0L
+                progressTotalBytes = grandTotal
             }
-            val contentResolver = context.contentResolver
-            val dir = getVaultDir()
 
             uris.forEachIndexed { index, uri ->
                 try {
@@ -388,27 +674,35 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
                         if (c.moveToFirst()) {
                             val nameIndex = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
                             if (nameIndex != -1) {
-                                val originalName = c.getString(nameIndex)
-                                if (originalName.isNotEmpty()) fileName = originalName
+                                val original = c.getString(nameIndex)
+                                if (original.isNotEmpty()) fileName = original
                             }
                         }
                     }
-                    if (!fileName.endsWith(".enc", ignoreCase = true)) {
-                        fileName = "$fileName.enc"
-                    }
+                    if (!fileName.endsWith(".enc", ignoreCase = true)) fileName = "$fileName.enc"
+
+                    val fileSize = fileSizes[index]
+                    val baseGrandProcessed = grandProcessed
 
                     withContext(Dispatchers.Main) {
-                        progressStepText = "Encrypting video ${index + 1} of $total"
+                        progressStepText = "Video ${index + 1} of $total"
                         progressFileText = fileName.removeSuffix(".enc")
-                        progressFraction = (index + 1f) / total
                     }
 
                     val inputStream = contentResolver.openInputStream(uri)
-                    val bytes = inputStream?.readBytes()
-                    if (bytes != null && bytes.isNotEmpty()) {
-                        val encryptedBytes = CryptoManager.encryptBytes(bytes)
-                        val targetFile = File(dir, fileName)
-                        targetFile.writeBytes(encryptedBytes)
+                    if (inputStream != null) {
+                        val encryptedBytes = CryptoManager.encryptBytesWithProgress(
+                            inputStream = inputStream,
+                            totalBytes = fileSize
+                        ) { bytesRead, _ ->
+                            val currentGrand = baseGrandProcessed + bytesRead
+                            coroutineScope.launch(Dispatchers.Main) {
+                                progressBytesProcessed = currentGrand
+                                progressFraction = if (grandTotal > 0) currentGrand.toFloat() / grandTotal else (index + 1f) / total
+                            }
+                        }
+                        File(dir, fileName).writeBytes(encryptedBytes)
+                        grandProcessed += fileSize
                     }
                 } catch (e: Exception) {
                     e.printStackTrace()
@@ -424,26 +718,24 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
     }
 
     LaunchedEffect(isUnlocked) {
-        if (isUnlocked) {
-            withContext(Dispatchers.IO) {
-                loadSecureFiles()
-            }
-        }
+        if (isUnlocked) withContext(Dispatchers.IO) { loadSecureFiles() }
     }
 
-    // Progress Modal overlay
+    // ── Progress Modal overlay ────────────────────────────────────────────────
     if (isProgressVisible) {
         CryptoProgressModal(
             title = progressTitle,
             currentStepText = progressStepText,
             currentFileText = progressFileText,
-            progressFraction = progressFraction
+            progressFraction = progressFraction,
+            bytesProcessed = progressBytesProcessed,
+            totalBytes = progressTotalBytes
         )
     }
 
-    // -------------------------------------------------------------
-    // FLOW 1: FIRST TIME SETUP WIZARD (If Master PIN is NOT yet set)
-    // -------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────────────
+    // FLOW 1: FIRST-TIME SETUP WIZARD
+    // ─────────────────────────────────────────────────────────────────────────
     if (!hasMasterPin) {
         Scaffold(
             topBar = {
@@ -471,260 +763,90 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
                         .padding(24.dp)
                         .verticalScroll(rememberScrollState())
                 ) {
-                    Surface(
-                        shape = CircleShape,
-                        color = MaterialTheme.colorScheme.primaryContainer,
-                        modifier = Modifier.size(72.dp)
-                    ) {
+                    Surface(shape = CircleShape, color = MaterialTheme.colorScheme.primaryContainer, modifier = Modifier.size(72.dp)) {
                         Box(contentAlignment = Alignment.Center) {
-                            Icon(
-                                imageVector = Icons.Default.Security,
-                                contentDescription = "Security",
-                                tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                                modifier = Modifier.size(40.dp)
-                            )
+                            Icon(Icons.Default.Security, contentDescription = "Security", tint = MaterialTheme.colorScheme.onPrimaryContainer, modifier = Modifier.size(40.dp))
                         }
                     }
-
                     Spacer(modifier = Modifier.height(16.dp))
 
                     when (setupStep) {
                         0 -> {
-                            Text(
-                                text = "Create Master PIN",
-                                style = MaterialTheme.typography.titleLarge,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                text = "Set a 4-digit PIN to secure your private vault.",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                textAlign = TextAlign.Center
-                            )
-                            Spacer(modifier = Modifier.height(24.dp))
-
-                            Row(
-                                horizontalArrangement = Arrangement.spacedBy(16.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                for (i in 1..4) {
-                                    val active = setupFirstPin.length >= i
-                                    Box(
-                                        modifier = Modifier
-                                            .size(18.dp)
-                                            .background(
-                                                color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
-                                                shape = CircleShape
-                                            )
-                                    )
-                                }
-                            }
-
-                            if (setupError != null) {
-                                Spacer(modifier = Modifier.height(16.dp))
-                                Text(setupError!!, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-                            }
-
-                            Spacer(modifier = Modifier.height(32.dp))
-
-                            // Keypad
-                            val buttons = listOf(
-                                listOf("1", "2", "3"),
-                                listOf("4", "5", "6"),
-                                listOf("7", "8", "9"),
-                                listOf("C", "0", "⌫")
-                            )
-                            for (row in buttons) {
-                                Row(
-                                    horizontalArrangement = Arrangement.spacedBy(16.dp),
-                                    modifier = Modifier.padding(vertical = 6.dp)
-                                ) {
-                                    for (key in row) {
-                                        Button(
-                                            onClick = {
-                                                setupError = null
-                                                when (key) {
-                                                    "C" -> setupFirstPin = ""
-                                                    "⌫" -> if (setupFirstPin.isNotEmpty()) setupFirstPin = setupFirstPin.dropLast(1)
-                                                    else -> {
-                                                        if (setupFirstPin.length < 4) {
-                                                            setupFirstPin += key
-                                                            if (setupFirstPin.length == 4) {
-                                                                setupStep = 1
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            },
-                                            colors = ButtonDefaults.buttonColors(
-                                                containerColor = if (key == "C" || key == "⌫") MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceVariant,
-                                                contentColor = if (key == "C" || key == "⌫") MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
-                                            ),
-                                            shape = RoundedCornerShape(16.dp),
-                                            modifier = Modifier.size(68.dp)
-                                        ) {
-                                            Text(text = key, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                                        }
+                            Text("Create Master PIN", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                            Spacer(Modifier.height(8.dp))
+                            Text("Set a 4-digit PIN to secure your private vault.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
+                            Spacer(Modifier.height(24.dp))
+                            PinDots(filled = setupFirstPin.length)
+                            if (setupError != null) { Spacer(Modifier.height(16.dp)); Text(setupError!!, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+                            Spacer(Modifier.height(32.dp))
+                            VaultKeypad(
+                                onKey = { k ->
+                                    setupError = null
+                                    when (k) {
+                                        "C" -> setupFirstPin = ""
+                                        "⌫" -> if (setupFirstPin.isNotEmpty()) setupFirstPin = setupFirstPin.dropLast(1)
+                                        else -> if (setupFirstPin.length < 4) { setupFirstPin += k; if (setupFirstPin.length == 4) setupStep = 1 }
                                     }
                                 }
-                            }
+                            )
                         }
-
                         1 -> {
-                            Text(
-                                text = "Confirm Master PIN",
-                                style = MaterialTheme.typography.titleLarge,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                text = "Re-enter your 4-digit PIN to confirm.",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                textAlign = TextAlign.Center
-                            )
-                            Spacer(modifier = Modifier.height(24.dp))
-
-                            Row(
-                                horizontalArrangement = Arrangement.spacedBy(16.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                for (i in 1..4) {
-                                    val active = setupConfirmPin.length >= i
-                                    Box(
-                                        modifier = Modifier
-                                            .size(18.dp)
-                                            .background(
-                                                color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
-                                                shape = CircleShape
-                                            )
-                                    )
-                                }
-                            }
-
-                            if (setupError != null) {
-                                Spacer(modifier = Modifier.height(16.dp))
-                                Text(setupError!!, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-                            }
-
-                            Spacer(modifier = Modifier.height(32.dp))
-
-                            val buttons = listOf(
-                                listOf("1", "2", "3"),
-                                listOf("4", "5", "6"),
-                                listOf("7", "8", "9"),
-                                listOf("C", "0", "⌫")
-                            )
-                            for (row in buttons) {
-                                Row(
-                                    horizontalArrangement = Arrangement.spacedBy(16.dp),
-                                    modifier = Modifier.padding(vertical = 6.dp)
-                                ) {
-                                    for (key in row) {
-                                        Button(
-                                            onClick = {
-                                                setupError = null
-                                                when (key) {
-                                                    "C" -> setupConfirmPin = ""
-                                                    "⌫" -> if (setupConfirmPin.isNotEmpty()) setupConfirmPin = setupConfirmPin.dropLast(1)
-                                                    else -> {
-                                                        if (setupConfirmPin.length < 4) {
-                                                            setupConfirmPin += key
-                                                            if (setupConfirmPin.length == 4) {
-                                                                if (setupConfirmPin == setupFirstPin) {
-                                                                    setupStep = 2
-                                                                } else {
-                                                                    setupError = "PINs do not match. Please try again."
-                                                                    setupConfirmPin = ""
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            },
-                                            colors = ButtonDefaults.buttonColors(
-                                                containerColor = if (key == "C" || key == "⌫") MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceVariant,
-                                                contentColor = if (key == "C" || key == "⌫") MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
-                                            ),
-                                            shape = RoundedCornerShape(16.dp),
-                                            modifier = Modifier.size(68.dp)
-                                        ) {
-                                            Text(text = key, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                            Text("Confirm Master PIN", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                            Spacer(Modifier.height(8.dp))
+                            Text("Re-enter your 4-digit PIN to confirm.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
+                            Spacer(Modifier.height(24.dp))
+                            PinDots(filled = setupConfirmPin.length)
+                            if (setupError != null) { Spacer(Modifier.height(16.dp)); Text(setupError!!, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+                            Spacer(Modifier.height(32.dp))
+                            VaultKeypad(
+                                onKey = { k ->
+                                    setupError = null
+                                    when (k) {
+                                        "C" -> setupConfirmPin = ""
+                                        "⌫" -> if (setupConfirmPin.isNotEmpty()) setupConfirmPin = setupConfirmPin.dropLast(1)
+                                        else -> if (setupConfirmPin.length < 4) {
+                                            setupConfirmPin += k
+                                            if (setupConfirmPin.length == 4) {
+                                                if (setupConfirmPin == setupFirstPin) setupStep = 2
+                                                else { setupError = "PINs do not match. Please try again."; setupConfirmPin = "" }
+                                            }
                                         }
                                     }
                                 }
-                            }
+                            )
                         }
-
                         2 -> {
-                            Text(
-                                text = "Security Recovery Setup",
-                                style = MaterialTheme.typography.titleLarge,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                text = "Choose a recovery question in case you forget your PIN. Universal Master Key recovery is also enabled.",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                textAlign = TextAlign.Center
-                            )
-                            Spacer(modifier = Modifier.height(24.dp))
-
+                            Text("Security Recovery Setup", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                            Spacer(Modifier.height(8.dp))
+                            Text("Choose a recovery question in case you forget your PIN. Universal Master Key recovery is also enabled.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
+                            Spacer(Modifier.height(24.dp))
                             ExposedDropdownMenuBox(
                                 expanded = isQuestionDropdownExpanded,
                                 onExpandedChange = { isQuestionDropdownExpanded = !isQuestionDropdownExpanded }
                             ) {
                                 OutlinedTextField(
-                                    value = setupQuestion,
-                                    onValueChange = {},
-                                    readOnly = true,
+                                    value = setupQuestion, onValueChange = {}, readOnly = true,
                                     label = { Text("Security Question") },
                                     trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = isQuestionDropdownExpanded) },
-                                    modifier = Modifier.fillMaxWidth().menuAnchor()
+                                    modifier = Modifier.fillMaxWidth().menuAnchor(MenuAnchorType.PrimaryNotEditable)
                                 )
-                                ExposedDropdownMenu(
-                                    expanded = isQuestionDropdownExpanded,
-                                    onDismissRequest = { isQuestionDropdownExpanded = false }
-                                ) {
+                                ExposedDropdownMenu(expanded = isQuestionDropdownExpanded, onDismissRequest = { isQuestionDropdownExpanded = false }) {
                                     defaultQuestions.forEach { q ->
-                                        DropdownMenuItem(
-                                            text = { Text(q) },
-                                            onClick = {
-                                                setupQuestion = q
-                                                isQuestionDropdownExpanded = false
-                                            }
-                                        )
+                                        DropdownMenuItem(text = { Text(q) }, onClick = { setupQuestion = q; isQuestionDropdownExpanded = false })
                                     }
                                 }
                             }
-
-                            Spacer(modifier = Modifier.height(12.dp))
-
+                            Spacer(Modifier.height(12.dp))
                             OutlinedTextField(
-                                value = setupAnswer,
-                                onValueChange = { setupAnswer = it; setupError = null },
-                                label = { Text("Your Secret Answer") },
-                                placeholder = { Text("e.g. Springfield") },
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth()
+                                value = setupAnswer, onValueChange = { setupAnswer = it; setupError = null },
+                                label = { Text("Your Secret Answer") }, placeholder = { Text("e.g. Springfield") },
+                                singleLine = true, modifier = Modifier.fillMaxWidth()
                             )
-
-                            if (setupError != null) {
-                                Spacer(modifier = Modifier.height(8.dp))
-                                Text(setupError!!, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-                            }
-
-                            Spacer(modifier = Modifier.height(24.dp))
-
+                            if (setupError != null) { Spacer(Modifier.height(8.dp)); Text(setupError!!, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+                            Spacer(Modifier.height(24.dp))
                             Button(
                                 onClick = {
-                                    if (setupAnswer.isBlank()) {
-                                        setupError = "Please enter an answer for recovery."
-                                        return@Button
-                                    }
-                                    // Save credentials
+                                    if (setupAnswer.isBlank()) { setupError = "Please enter an answer for recovery."; return@Button }
                                     securePrefs.putString("app_pin", setupFirstPin)
                                     securePrefs.setSecurityRecovery(setupQuestion, setupAnswer)
                                     hasMasterPin = true
@@ -744,9 +866,9 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
         return
     }
 
-    // -------------------------------------------------------------
-    // FLOW 2: STANDARD VAULT PIN ENTRY (With Animations & Recovery)
-    // -------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────────────
+    // FLOW 2: VAULT PIN ENTRY
+    // ─────────────────────────────────────────────────────────────────────────
     if (!isUnlocked) {
         Scaffold(
             topBar = {
@@ -761,262 +883,102 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
             }
         ) { paddingValues ->
             Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(paddingValues)
-                    .background(MaterialTheme.colorScheme.background),
+                modifier = Modifier.fillMaxSize().padding(paddingValues).background(MaterialTheme.colorScheme.background),
                 contentAlignment = Alignment.Center
             ) {
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(24.dp)
-                        .verticalScroll(rememberScrollState())
+                    modifier = Modifier.fillMaxWidth().padding(24.dp).verticalScroll(rememberScrollState())
                 ) {
-                    Surface(
-                        shape = CircleShape,
-                        color = MaterialTheme.colorScheme.primaryContainer,
-                        modifier = Modifier.size(68.dp)
-                    ) {
+                    Surface(shape = CircleShape, color = MaterialTheme.colorScheme.primaryContainer, modifier = Modifier.size(68.dp)) {
                         Box(contentAlignment = Alignment.Center) {
-                            Icon(
-                                imageVector = Icons.Default.Lock,
-                                contentDescription = "Encrypted",
-                                tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                                modifier = Modifier.size(36.dp)
-                            )
+                            Icon(Icons.Default.Lock, contentDescription = "Encrypted", tint = MaterialTheme.colorScheme.onPrimaryContainer, modifier = Modifier.size(36.dp))
                         }
                     }
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Text(
-                        text = "Enter Vault PIN",
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "Enter your 4-digit Master PIN to decrypt files",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Center
-                    )
-                    Spacer(modifier = Modifier.height(24.dp))
-                    
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(16.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        for (i in 1..4) {
-                            val active = enteredPin.length >= i
-                            Box(
-                                modifier = Modifier
-                                    .size(18.dp)
-                                    .background(
-                                        color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
-                                        shape = CircleShape
-                                    )
-                            )
-                        }
-                    }
-                    
-                    if (pinError != null) {
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Text(
-                            text = pinError!!,
-                            color = MaterialTheme.colorScheme.error,
-                            style = MaterialTheme.typography.bodyMedium
-                        )
-                    }
-                    
-                    Spacer(modifier = Modifier.height(28.dp))
-                    
-                    Column(
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        val buttons = listOf(
-                            listOf("1", "2", "3"),
-                            listOf("4", "5", "6"),
-                            listOf("7", "8", "9"),
-                            listOf("C", "0", "⌫")
-                        )
-                        for (row in buttons) {
-                            Row(
-                                horizontalArrangement = Arrangement.spacedBy(16.dp)
-                            ) {
-                                for (key in row) {
-                                    Button(
-                                        onClick = {
-                                            pinError = null
-                                            when (key) {
-                                                "C" -> enteredPin = ""
-                                                "⌫" -> if (enteredPin.isNotEmpty()) enteredPin = enteredPin.dropLast(1)
-                                                else -> {
-                                                    if (enteredPin.length < 4) {
-                                                        enteredPin += key
-                                                        if (enteredPin.length == 4) {
-                                                            if (enteredPin == correctPin) {
-                                                                isUnlocked = true
-                                                                isDecoyMode = false
-                                                                enteredPin = ""
-                                                            } else if (decoyPin.isNotEmpty() && enteredPin == decoyPin) {
-                                                                isUnlocked = true
-                                                                isDecoyMode = true
-                                                                enteredPin = ""
-                                                            } else {
-                                                                pinError = "Incorrect PIN. Access Denied."
-                                                                enteredPin = ""
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        },
-                                        colors = ButtonDefaults.buttonColors(
-                                            containerColor = if (key == "C" || key == "⌫") MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceVariant,
-                                            contentColor = if (key == "C" || key == "⌫") MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
-                                        ),
-                                        shape = RoundedCornerShape(16.dp),
-                                        modifier = Modifier.size(68.dp)
-                                    ) {
-                                        Text(
-                                            text = key,
-                                            style = MaterialTheme.typography.titleMedium,
-                                            fontWeight = FontWeight.Bold
-                                        )
+                    Spacer(Modifier.height(16.dp))
+                    Text("Enter Vault PIN", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(8.dp))
+                    Text("Enter your 4-digit Master PIN to decrypt files", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
+                    Spacer(Modifier.height(24.dp))
+                    PinDots(filled = enteredPin.length)
+                    if (pinError != null) { Spacer(Modifier.height(16.dp)); Text(pinError!!, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium) }
+                    Spacer(Modifier.height(28.dp))
+                    VaultKeypad(
+                        onKey = { k ->
+                            pinError = null
+                            when (k) {
+                                "C" -> enteredPin = ""
+                                "⌫" -> if (enteredPin.isNotEmpty()) enteredPin = enteredPin.dropLast(1)
+                                else -> if (enteredPin.length < 4) {
+                                    enteredPin += k
+                                    if (enteredPin.length == 4) {
+                                        when {
+                                            enteredPin == correctPin -> { isUnlocked = true; isDecoyMode = false; enteredPin = "" }
+                                            decoyPin.isNotEmpty() && enteredPin == decoyPin -> { isUnlocked = true; isDecoyMode = true; enteredPin = "" }
+                                            else -> { pinError = "Incorrect PIN. Access Denied."; enteredPin = "" }
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
-
-                    Spacer(modifier = Modifier.height(20.dp))
-
-                    TextButton(
-                        onClick = {
-                            recoveryInput = ""
-                            recoveryError = null
-                            showRecoveryDialog = true
-                        }
-                    ) {
-                        Text(
-                            text = "Forgot PIN? / Master Recovery",
-                            color = MaterialTheme.colorScheme.primary,
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.SemiBold
-                        )
+                    )
+                    Spacer(Modifier.height(20.dp))
+                    TextButton(onClick = { recoveryInput = ""; recoveryError = null; showRecoveryDialog = true }) {
+                        Text("Forgot PIN? / Master Recovery", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
                     }
                 }
             }
         }
 
-        // Recovery Dialog
         if (showRecoveryDialog) {
             val savedQuestion = remember { securePrefs.getSecurityQuestion() }
             AlertDialog(
                 onDismissRequest = { showRecoveryDialog = false },
-                title = {
-                    Text(
-                        text = "Vault Recovery",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
-                    )
-                },
+                title = { Text("Vault Recovery", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) },
                 text = {
-                    Column(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        Text(
-                            text = "Unlock using your security answer or the Universal Master Key.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-
+                    Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Text("Unlock using your security answer or the Universal Master Key.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         if (savedQuestion.isNotBlank()) {
-                            Surface(
-                                shape = RoundedCornerShape(8.dp),
-                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
+                            Surface(shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f), modifier = Modifier.fillMaxWidth()) {
                                 Column(modifier = Modifier.padding(10.dp)) {
-                                    Text(
-                                        text = "Security Question:",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.secondary
-                                    )
-                                    Text(
-                                        text = savedQuestion,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        fontWeight = FontWeight.Medium
-                                    )
+                                    Text("Security Question:", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
+                                    Text(savedQuestion, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
                                 }
                             }
                         }
-
                         OutlinedTextField(
                             value = recoveryInput,
-                            onValueChange = {
-                                recoveryInput = it
-                                recoveryError = null
-                            },
+                            onValueChange = { recoveryInput = it; recoveryError = null },
                             label = { Text(if (savedQuestion.isNotBlank()) "Security Answer or Master Key" else "Master Recovery Key") },
                             placeholder = { Text("Enter credentials") },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth()
+                            singleLine = true, modifier = Modifier.fillMaxWidth()
                         )
-
-                        if (recoveryError != null) {
-                            Text(
-                                text = recoveryError!!,
-                                color = MaterialTheme.colorScheme.error,
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                        }
+                        if (recoveryError != null) Text(recoveryError!!, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                     }
                 },
                 confirmButton = {
-                    Button(
-                        onClick = {
-                            val isMaster = MasterKeyManager.isMasterKey(recoveryInput)
-                            val isSecAnswer = savedQuestion.isNotBlank() && securePrefs.verifySecurityAnswer(recoveryInput)
-
-                            if (isMaster || isSecAnswer) {
-                                showRecoveryDialog = false
-                                isUnlocked = true
-                                isDecoyMode = false
-                                Toast.makeText(context, "Recovery verified! Vault unlocked.", Toast.LENGTH_SHORT).show()
-                            } else {
-                                recoveryError = "Invalid recovery credentials."
-                            }
-                        }
-                    ) {
-                        Text("Unlock Vault")
-                    }
+                    Button(onClick = {
+                        val isMaster = MasterKeyManager.isMasterKey(recoveryInput)
+                        val isSecAnswer = savedQuestion.isNotBlank() && securePrefs.verifySecurityAnswer(recoveryInput)
+                        if (isMaster || isSecAnswer) {
+                            showRecoveryDialog = false; isUnlocked = true; isDecoyMode = false
+                            Toast.makeText(context, "Recovery verified! Vault unlocked.", Toast.LENGTH_SHORT).show()
+                        } else recoveryError = "Invalid recovery credentials."
+                    }) { Text("Unlock Vault") }
                 },
-                dismissButton = {
-                    TextButton(onClick = { showRecoveryDialog = false }) {
-                        Text("Cancel")
-                    }
-                }
+                dismissButton = { TextButton(onClick = { showRecoveryDialog = false }) { Text("Cancel") } }
             )
         }
         return
     }
 
-    // -------------------------------------------------------------
-    // FLOW 3: UNLOCKED VAULT (With Legacy Restore, Batch & Multi-Select)
-    // -------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────────────
+    // FLOW 3: UNLOCKED VAULT
+    // ─────────────────────────────────────────────────────────────────────────
     val photosFiles = secureFiles.filter { VaultRestoreManager.isImageFile(it.name) }
     val videosFiles = secureFiles.filter { VaultRestoreManager.isVideoFile(it.name) }
     val notesFiles = secureFiles.filter { !VaultRestoreManager.isImageFile(it.name) && !VaultRestoreManager.isVideoFile(it.name) }
-
-    val currentTabFiles = when (activeTab) {
-        0 -> notesFiles
-        1 -> photosFiles
-        else -> videosFiles
-    }
+    val currentTabFiles = when (activeTab) { 0 -> notesFiles; 1 -> photosFiles; else -> videosFiles }
 
     Scaffold(
         topBar = {
@@ -1029,17 +991,9 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text("Secure Vault", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                                 if (isDecoyMode) {
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Surface(
-                                        color = MaterialTheme.colorScheme.surfaceVariant,
-                                        shape = CircleShape
-                                    ) {
-                                        Text(
-                                            "Decoy Mode",
-                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
+                                    Spacer(Modifier.width(8.dp))
+                                    Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = CircleShape) {
+                                        Text("Decoy Mode", modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     }
                                 }
                             }
@@ -1049,39 +1003,23 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
                 },
                 navigationIcon = {
                     if (isSelectionMode) {
-                        IconButton(onClick = {
-                            isSelectionMode = false
-                            selectedFilePaths = emptySet()
-                        }) {
+                        IconButton(onClick = { isSelectionMode = false; selectedFilePaths = emptySet() }) {
                             Icon(Icons.Default.Close, contentDescription = "Exit Selection Mode")
                         }
                     } else {
-                        IconButton(onClick = onBack) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-                        }
+                        IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
                     }
                 },
                 actions = {
                     if (isSelectionMode) {
-                        val currentTabPaths = currentTabFiles.map { it.absolutePath }
-                        val isAllSelected = currentTabPaths.isNotEmpty() && selectedFilePaths.containsAll(currentTabPaths)
-                        IconButton(onClick = {
-                            selectedFilePaths = if (isAllSelected) {
-                                emptySet()
-                            } else {
-                                currentTabPaths.toSet()
-                            }
-                        }) {
-                            Icon(
-                                imageVector = if (isAllSelected) Icons.Default.Deselect else Icons.Default.SelectAll,
-                                contentDescription = "Toggle Select All"
-                            )
+                        val currentPaths = currentTabFiles.map { it.absolutePath }
+                        val isAllSelected = currentPaths.isNotEmpty() && selectedFilePaths.containsAll(currentPaths)
+                        IconButton(onClick = { selectedFilePaths = if (isAllSelected) emptySet() else currentPaths.toSet() }) {
+                            Icon(if (isAllSelected) Icons.Default.Deselect else Icons.Default.SelectAll, contentDescription = "Toggle Select All")
                         }
                     } else {
                         if (activeTab != 0 && currentTabFiles.isNotEmpty()) {
-                            IconButton(onClick = { isSelectionMode = true }) {
-                                Icon(Icons.Default.CheckCircle, contentDescription = "Select Multiple")
-                            }
+                            IconButton(onClick = { isSelectionMode = true }) { Icon(Icons.Default.CheckCircle, contentDescription = "Select Multiple") }
                         }
                         IconButton(onClick = { isUnlocked = false; isDecoyMode = false }) {
                             Icon(Icons.Default.Lock, contentDescription = "Lock Vault", tint = MaterialTheme.colorScheme.primary)
@@ -1092,31 +1030,17 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
         },
         bottomBar = {
             if (isSelectionMode && selectedFilePaths.isNotEmpty()) {
-                Surface(
-                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                    shadowElevation = 8.dp,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        // Batch Delete
+                Surface(color = MaterialTheme.colorScheme.surfaceContainerHigh, shadowElevation = 8.dp, modifier = Modifier.fillMaxWidth()) {
+                    Row(modifier = Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
                         OutlinedButton(
                             onClick = { showBatchDeleteConfirm = true },
                             colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
-                            modifier = Modifier.weight(1f),
-                            shape = RoundedCornerShape(12.dp)
+                            modifier = Modifier.weight(1f), shape = RoundedCornerShape(12.dp)
                         ) {
                             Icon(Icons.Default.Delete, contentDescription = "Delete Selected", modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
+                            Spacer(Modifier.width(6.dp))
                             Text("Delete (${selectedFilePaths.size})")
                         }
-
-                        // Batch Restore to Gallery (Available for Photos & Videos)
                         if (activeTab != 0) {
                             Button(
                                 onClick = {
@@ -1124,41 +1048,29 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
                                     coroutineScope.launch(Dispatchers.IO) {
                                         val total = filesToRestore.size
                                         withContext(Dispatchers.Main) {
-                                            isProgressVisible = true
-                                            progressTitle = "Restoring to Gallery"
-                                            progressFraction = 0f
+                                            isProgressVisible = true; progressTitle = "Restoring to Gallery"; progressFraction = 0f
+                                            progressBytesProcessed = 0L; progressTotalBytes = 0L
                                         }
-
                                         var successCount = 0
                                         filesToRestore.forEachIndexed { idx, file ->
                                             withContext(Dispatchers.Main) {
-                                                progressStepText = "Restoring file ${idx + 1} of $total"
+                                                progressStepText = "Restoring ${idx + 1} of $total"
                                                 progressFileText = file.name.removeSuffix(".enc")
                                                 progressFraction = (idx + 1f) / total
                                             }
-
-                                            val result = VaultRestoreManager.restoreFileToGallery(
-                                                context = context,
-                                                vaultFile = file,
-                                                deleteVaultFileOnSuccess = true
-                                            )
+                                            val result = VaultRestoreManager.restoreFileToGallery(context = context, vaultFile = file, deleteVaultFileOnSuccess = true)
                                             if (result.isSuccess) successCount++
                                         }
-
                                         withContext(Dispatchers.Main) {
-                                            isProgressVisible = false
-                                            isSelectionMode = false
-                                            selectedFilePaths = emptySet()
-                                            loadSecureFiles()
-                                            Toast.makeText(context, "Successfully restored $successCount files to Gallery!", Toast.LENGTH_LONG).show()
+                                            isProgressVisible = false; isSelectionMode = false; selectedFilePaths = emptySet(); loadSecureFiles()
+                                            Toast.makeText(context, "Restored $successCount files to Gallery!", Toast.LENGTH_LONG).show()
                                         }
                                     }
                                 },
-                                modifier = Modifier.weight(1.3f),
-                                shape = RoundedCornerShape(12.dp)
+                                modifier = Modifier.weight(1.3f), shape = RoundedCornerShape(12.dp)
                             ) {
                                 Icon(Icons.Default.Restore, contentDescription = "Restore", modifier = Modifier.size(18.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
+                                Spacer(Modifier.width(6.dp))
                                 Text("Restore (${selectedFilePaths.size})")
                             }
                         }
@@ -1170,15 +1082,10 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
             if (!isSelectionMode) {
                 FloatingActionButton(
                     onClick = {
-                        if (activeTab == 0) {
-                            newFileName = ""
-                            newFileContent = ""
-                            saveError = null
-                            showCreateDialog = true
-                        } else if (activeTab == 1) {
-                            photosPickerLauncher.launch("image/*")
-                        } else {
-                            videosPickerLauncher.launch("video/*")
+                        when (activeTab) {
+                            0 -> { newFileName = ""; newFileContent = ""; saveError = null; showCreateDialog = true }
+                            1 -> photosPickerLauncher.launch("image/*")
+                            else -> videosPickerLauncher.launch("video/*")
                         }
                     },
                     containerColor = MaterialTheme.colorScheme.primaryContainer,
@@ -1189,74 +1096,31 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
             }
         }
     ) { paddingValues ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
-        ) {
+        Column(modifier = Modifier.fillMaxSize().padding(paddingValues)) {
             TabRow(selectedTabIndex = activeTab) {
-                Tab(
-                    selected = activeTab == 0,
-                    onClick = {
-                        activeTab = 0
-                        isSelectionMode = false
-                        selectedFilePaths = emptySet()
-                    },
-                    text = { Text("Notes (${notesFiles.size})") },
-                    icon = { Icon(Icons.Default.Folder, contentDescription = "Notes") }
-                )
-                Tab(
-                    selected = activeTab == 1,
-                    onClick = {
-                        activeTab = 1
-                        isSelectionMode = false
-                        selectedFilePaths = emptySet()
-                    },
-                    text = { Text("Photos (${photosFiles.size})") },
-                    icon = { Icon(Icons.Default.Image, contentDescription = "Photos") }
-                )
-                Tab(
-                    selected = activeTab == 2,
-                    onClick = {
-                        activeTab = 2
-                        isSelectionMode = false
-                        selectedFilePaths = emptySet()
-                    },
-                    text = { Text("Videos (${videosFiles.size})") },
-                    icon = { Icon(Icons.Default.Movie, contentDescription = "Videos") }
-                )
+                Tab(selected = activeTab == 0, onClick = { activeTab = 0; isSelectionMode = false; selectedFilePaths = emptySet() },
+                    text = { Text("Notes (${notesFiles.size})") }, icon = { Icon(Icons.Default.Folder, contentDescription = "Notes") })
+                Tab(selected = activeTab == 1, onClick = { activeTab = 1; isSelectionMode = false; selectedFilePaths = emptySet() },
+                    text = { Text("Photos (${photosFiles.size})") }, icon = { Icon(Icons.Default.Image, contentDescription = "Photos") })
+                Tab(selected = activeTab == 2, onClick = { activeTab = 2; isSelectionMode = false; selectedFilePaths = emptySet() },
+                    text = { Text("Videos (${videosFiles.size})") }, icon = { Icon(Icons.Default.Movie, contentDescription = "Videos") })
             }
 
             if (currentTabFiles.isEmpty()) {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        modifier = Modifier.padding(24.dp)
-                    ) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(24.dp)) {
                         Icon(
-                            imageVector = when (activeTab) {
-                                0 -> Icons.Default.Folder
-                                1 -> Icons.Default.Image
-                                else -> Icons.Default.Movie
-                            },
+                            imageVector = when (activeTab) { 0 -> Icons.Default.Folder; 1 -> Icons.Default.Image; else -> Icons.Default.Movie },
                             contentDescription = "Empty",
                             tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
                             modifier = Modifier.size(80.dp)
                         )
-                        Spacer(modifier = Modifier.height(16.dp))
+                        Spacer(Modifier.height(16.dp))
                         Text(
-                            text = when (activeTab) {
-                                0 -> "No Encrypted Notes"
-                                1 -> "No Secure Photos"
-                                else -> "No Secure Videos"
-                            },
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.SemiBold
+                            text = when (activeTab) { 0 -> "No Encrypted Notes"; 1 -> "No Secure Photos"; else -> "No Secure Videos" },
+                            style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold
                         )
-                        Spacer(modifier = Modifier.height(8.dp))
+                        Spacer(Modifier.height(8.dp))
                         Text(
                             text = when (activeTab) {
                                 0 -> "Write and secure private text documents. They are protected using AES-256."
@@ -1270,11 +1134,13 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
                     }
                 }
             } else {
+                // ── Improved grid: 2 columns for notes, 2 for photos, 2 for videos
+                val columns = if (activeTab == 0) 2 else 2
                 LazyVerticalGrid(
-                    columns = GridCells.Fixed(2),
-                    contentPadding = PaddingValues(16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    columns = GridCells.Fixed(columns),
+                    contentPadding = PaddingValues(12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
                     modifier = Modifier.fillMaxSize()
                 ) {
                     items(currentTabFiles) { file ->
@@ -1284,92 +1150,91 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
                                 .fillMaxWidth()
                                 .clickable {
                                     if (isSelectionMode) {
-                                        selectedFilePaths = if (isSelected) {
-                                            selectedFilePaths - file.absolutePath
-                                        } else {
-                                            selectedFilePaths + file.absolutePath
-                                        }
+                                        selectedFilePaths = if (isSelected) selectedFilePaths - file.absolutePath else selectedFilePaths + file.absolutePath
                                     } else {
+                                        selectedFile = file
+                                        decryptedImageBitmap = null
+                                        decryptedVideoBytes = null
+                                        decryptedContent = null
+                                        isMediaLoading = activeTab != 0
                                         if (activeTab == 0) {
                                             try {
-                                                val encryptedText = file.readText(Charsets.UTF_8)
-                                                val decrypted = CryptoManager.decrypt(encryptedText)
-                                                decryptedContent = decrypted
-                                            } catch (e: Exception) {
-                                                decryptedContent = "Error: Decryption failed."
+                                                val enc = file.readText(Charsets.UTF_8)
+                                                decryptedContent = CryptoManager.decrypt(enc)
+                                            } catch (e: Exception) { decryptedContent = "Error: Decryption failed." }
+                                        } else {
+                                            coroutineScope.launch(Dispatchers.IO) {
+                                                try {
+                                                    val enc = file.readBytes()
+                                                    val dec = CryptoManager.decryptBytes(enc)
+                                                    withContext(Dispatchers.Main) {
+                                                        if (activeTab == 1) {
+                                                            val bmp = BitmapFactory.decodeByteArray(dec, 0, dec.size)
+                                                            decryptedImageBitmap = bmp?.asImageBitmap()
+                                                        } else {
+                                                            decryptedVideoBytes = dec
+                                                        }
+                                                        isMediaLoading = false
+                                                    }
+                                                } catch (e: Exception) {
+                                                    e.printStackTrace()
+                                                    withContext(Dispatchers.Main) { isMediaLoading = false }
+                                                }
                                             }
                                         }
-                                        selectedFile = file
                                     }
                                 },
                             colors = CardDefaults.cardColors(
                                 containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f) else MaterialTheme.colorScheme.surfaceVariant
                             ),
                             border = if (isSelected) androidx.compose.foundation.BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null,
-                            shape = RoundedCornerShape(12.dp)
+                            shape = RoundedCornerShape(14.dp),
+                            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
                         ) {
-                            Column(
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
+                            Column(modifier = Modifier.fillMaxWidth()) {
                                 Box(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .height(120.dp)
-                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.05f))
+                                        .height(if (activeTab == 0) 80.dp else 130.dp)
+                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.06f))
                                 ) {
-                                    if (activeTab == 1) {
-                                        EncryptedImageThumbnail(file)
-                                    } else {
-                                        Box(
-                                            modifier = Modifier.fillMaxSize(),
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            Icon(
-                                                imageVector = when (activeTab) {
-                                                    0 -> Icons.Default.Folder
-                                                    else -> Icons.Default.PlayArrow
-                                                },
-                                                contentDescription = "File Type",
-                                                tint = MaterialTheme.colorScheme.primary,
-                                                modifier = Modifier.size(40.dp)
+                                    when (activeTab) {
+                                        1 -> EncryptedImageThumbnail(file)
+                                        2 -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                            // Video thumbnail placeholder with gradient overlay
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxSize()
+                                                    .background(Brush.verticalGradient(listOf(Color(0xFF1A1A2E), Color(0xFF16213E))))
                                             )
+                                            Surface(shape = CircleShape, color = Color.White.copy(alpha = 0.15f), modifier = Modifier.size(44.dp)) {
+                                                Box(contentAlignment = Alignment.Center) {
+                                                    Icon(Icons.Default.PlayArrow, contentDescription = "Play Video", tint = Color.White, modifier = Modifier.size(28.dp))
+                                                }
+                                            }
+                                        }
+                                        else -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                            Icon(Icons.AutoMirrored.Filled.Article, contentDescription = "Note", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(32.dp))
                                         }
                                     }
-
                                     if (isSelectionMode) {
-                                        Box(
-                                            modifier = Modifier
-                                                .align(Alignment.TopEnd)
-                                                .padding(8.dp)
-                                        ) {
+                                        Box(modifier = Modifier.align(Alignment.TopEnd).padding(8.dp)) {
                                             Icon(
                                                 imageVector = if (isSelected) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
                                                 contentDescription = "Selection",
-                                                tint = if (isSelected) MaterialTheme.colorScheme.primary else Color.White
+                                                tint = if (isSelected) MaterialTheme.colorScheme.primary else Color.White,
+                                                modifier = Modifier.background(Color.Black.copy(alpha = 0.3f), CircleShape)
                                             )
                                         }
                                     }
                                 }
-                                
-                                Column(modifier = Modifier.padding(12.dp)) {
-                                    Text(
-                                        text = file.name.removeSuffix(".enc"),
-                                        style = MaterialTheme.typography.titleSmall,
-                                        fontWeight = FontWeight.Bold,
-                                        maxLines = 1
-                                    )
-                                    Spacer(modifier = Modifier.height(4.dp))
-                                    Text(
-                                        text = "${file.length() / 1024} KB",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                    Spacer(modifier = Modifier.height(4.dp))
-                                    Text(
-                                        text = dateFormatter.format(Date(file.lastModified())),
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.secondary
-                                    )
+                                Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
+                                    Text(file.name.removeSuffix(".enc"), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                                    Spacer(Modifier.height(2.dp))
+                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+                                        Text("${file.length() / 1024} KB", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        Text(dateFormatter.format(Date(file.lastModified())), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
+                                    }
                                 }
                             }
                         }
@@ -1379,227 +1244,181 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
         }
     }
 
-    // -------------------------------------------------------------
-    // FILE PREVIEW MODAL DIALOG (With Single File "Restore to Gallery")
-    // -------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────────────
+    // FILE PREVIEW / VIEWER
+    // ─────────────────────────────────────────────────────────────────────────
     if (selectedFile != null) {
         val fileToPreview = selectedFile!!
         val isPhoto = VaultRestoreManager.isImageFile(fileToPreview.name)
         val isVideo = VaultRestoreManager.isVideoFile(fileToPreview.name)
 
-        LaunchedEffect(fileToPreview) {
-            if (isPhoto) {
-                withContext(Dispatchers.IO) {
-                    try {
-                        val bytes = fileToPreview.readBytes()
-                        val decBytes = CryptoManager.decryptBytes(bytes)
-                        val bitmap = BitmapFactory.decodeByteArray(decBytes, 0, decBytes.size)
-                        decryptedImageBitmap = bitmap?.asImageBitmap()
-                    } catch (e: Exception) {
-                        e.printStackTrace()
-                    }
+        val handleRestore: (File) -> Unit = { file ->
+            coroutineScope.launch(Dispatchers.IO) {
+                withContext(Dispatchers.Main) {
+                    isProgressVisible = true
+                    progressTitle = "Restoring to Gallery"
+                    progressStepText = "Exporting decrypted file"
+                    progressFileText = file.name.removeSuffix(".enc")
+                    progressFraction = 0.5f
+                    progressBytesProcessed = 0L
+                    progressTotalBytes = 0L
                 }
-            } else if (isVideo) {
-                withContext(Dispatchers.IO) {
-                    try {
-                        val bytes = fileToPreview.readBytes()
-                        val decBytes = CryptoManager.decryptBytes(bytes)
-                        val temp = File(context.cacheDir, "temp_vault_video.mp4")
-                        temp.writeBytes(decBytes)
-                        decryptedVideoFile = temp
-                    } catch (e: Exception) {
-                        e.printStackTrace()
+                val res = VaultRestoreManager.restoreFileToGallery(context = context, vaultFile = file, deleteVaultFileOnSuccess = true)
+                withContext(Dispatchers.Main) {
+                    isProgressVisible = false
+                    if (res.isSuccess) {
+                        Toast.makeText(context, "Restored to Gallery (${res.getOrNull()?.restoredFileName})", Toast.LENGTH_LONG).show()
+                        selectedFile = null
+                        decryptedContent = null
+                        decryptedImageBitmap = null
+                        decryptedVideoBytes = null
+                        isMediaLoading = false
+                        showFullScreenViewer = false
+                        loadSecureFiles()
+                    } else {
+                        Toast.makeText(context, "Failed to restore: ${res.exceptionOrNull()?.message}", Toast.LENGTH_SHORT).show()
                     }
                 }
             }
         }
 
-        Dialog(onDismissRequest = {
+        val handleDelete: (File) -> Unit = { file ->
+            file.delete()
             selectedFile = null
             decryptedContent = null
             decryptedImageBitmap = null
-            decryptedVideoFile?.delete()
-            decryptedVideoFile = null
-        }) {
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp),
-                shape = RoundedCornerShape(24.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(20.dp)
+            decryptedVideoBytes = null
+            isMediaLoading = false
+            showFullScreenViewer = false
+            loadSecureFiles()
+            Toast.makeText(context, "File deleted from vault", Toast.LENGTH_SHORT).show()
+        }
+
+        // 1. Loading modal while decrypting media
+        if (isMediaLoading && (isPhoto || isVideo)) {
+            Dialog(onDismissRequest = {
+                isMediaLoading = false
+                selectedFile = null
+                showFullScreenViewer = false
+            }) {
+                Card(
+                    shape = RoundedCornerShape(20.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
                 ) {
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                        modifier = Modifier.padding(24.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(16.dp)
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
+                        CircularProgressIndicator(modifier = Modifier.size(32.dp), strokeWidth = 3.dp)
+                        Column {
                             Text(
-                                text = fileToPreview.name.removeSuffix(".enc"),
-                                style = MaterialTheme.typography.titleLarge,
-                                fontWeight = FontWeight.Bold,
-                                maxLines = 1
+                                text = if (isPhoto) "Opening Photo…" else "Opening Video…",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
                             )
                             Text(
-                                text = "Decrypted Preview",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.secondary
-                            )
-                        }
-                        IconButton(
-                            onClick = {
-                                fileToPreview.delete()
-                                selectedFile = null
-                                decryptedContent = null
-                                decryptedImageBitmap = null
-                                decryptedVideoFile?.delete()
-                                decryptedVideoFile = null
-                                loadSecureFiles()
-                            }
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Delete,
-                                contentDescription = "Delete",
-                                tint = MaterialTheme.colorScheme.error
+                                text = "Decrypting securely on-the-fly…",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                     }
-                    
-                    Spacer(modifier = Modifier.height(16.dp))
-                    
-                    if (isPhoto) {
-                        Card(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(250.dp),
-                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                            shape = RoundedCornerShape(12.dp)
+                }
+            }
+        }
+
+        // 2. Full-screen Photo viewer
+        if (!isMediaLoading && isPhoto && decryptedImageBitmap != null) {
+            FullScreenImageViewer(
+                bitmap = decryptedImageBitmap!!,
+                fileName = fileToPreview.name,
+                onRestore = { handleRestore(fileToPreview) },
+                onDelete = { handleDelete(fileToPreview) },
+                onClose = {
+                    selectedFile = null
+                    decryptedImageBitmap = null
+                    showFullScreenViewer = false
+                }
+            )
+        }
+
+        // 3. Full-screen Video viewer (ExoPlayer)
+        if (!isMediaLoading && isVideo && decryptedVideoBytes != null) {
+            FullScreenVideoViewer(
+                decryptedBytes = decryptedVideoBytes!!,
+                fileName = fileToPreview.name,
+                onRestore = { handleRestore(fileToPreview) },
+                onDelete = { handleDelete(fileToPreview) },
+                onClose = {
+                    selectedFile = null
+                    decryptedVideoBytes = null
+                    showFullScreenViewer = false
+                }
+            )
+        }
+
+        // 4. Encrypted Note detail dialog
+        if (!isPhoto && !isVideo) {
+            Dialog(
+                onDismissRequest = {
+                    selectedFile = null
+                    decryptedContent = null
+                },
+                properties = DialogProperties(usePlatformDefaultWidth = false)
+            ) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth(0.92f)
+                        .padding(8.dp),
+                    shape = RoundedCornerShape(20.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth().padding(20.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                if (decryptedImageBitmap != null) {
-                                    Image(
-                                        bitmap = decryptedImageBitmap!!,
-                                        contentDescription = "Decrypted",
-                                        modifier = Modifier.fillMaxSize(),
-                                        contentScale = ContentScale.Fit
-                                    )
-                                } else {
-                                    CircularProgressIndicator()
-                                }
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(fileToPreview.name.removeSuffix(".enc"), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, maxLines = 1)
+                                Text("Decrypted Note", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
+                            }
+                            IconButton(onClick = { handleDelete(fileToPreview) }) {
+                                Icon(Icons.Default.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.error)
                             }
                         }
-                    } else if (isVideo) {
+
+                        Spacer(Modifier.height(16.dp))
+
                         Card(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(250.dp),
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 120.dp, max = 280.dp),
                             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                             shape = RoundedCornerShape(12.dp)
                         ) {
-                            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                if (decryptedVideoFile != null) {
-                                    AndroidView(
-                                        factory = { ctx ->
-                                            VideoView(ctx).apply {
-                                                setVideoPath(decryptedVideoFile!!.absolutePath)
-                                                val mediaController = MediaController(ctx)
-                                                mediaController.setAnchorView(this)
-                                                setMediaController(mediaController)
-                                                setOnPreparedListener { start() }
-                                            }
-                                        },
-                                        modifier = Modifier.fillMaxSize()
-                                    )
-                                } else {
-                                    CircularProgressIndicator()
-                                }
+                            Box(modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
+                                Text(
+                                    text = decryptedContent ?: "Decrypting…",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    modifier = Modifier.padding(16.dp)
+                                )
                             }
                         }
-                    } else {
-                        Card(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .heightIn(min = 120.dp, max = 240.dp)
-                                .verticalScroll(rememberScrollState()),
-                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Text(
-                                text = decryptedContent ?: "Decrypting...",
-                                style = MaterialTheme.typography.bodyMedium,
-                                modifier = Modifier.padding(16.dp)
-                            )
-                        }
-                    }
-                    
-                    Spacer(modifier = Modifier.height(20.dp))
-                    
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        // Restore button for Photos and Videos
-                        if (isPhoto || isVideo) {
-                            FilledTonalButton(
+
+                        Spacer(Modifier.height(20.dp))
+
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                            Button(
                                 onClick = {
-                                    coroutineScope.launch(Dispatchers.IO) {
-                                        withContext(Dispatchers.Main) {
-                                            isProgressVisible = true
-                                            progressTitle = "Restoring to Gallery"
-                                            progressStepText = "Exporting decrypted file"
-                                            progressFileText = fileToPreview.name.removeSuffix(".enc")
-                                            progressFraction = 0.5f
-                                        }
-
-                                        val res = VaultRestoreManager.restoreFileToGallery(
-                                            context = context,
-                                            vaultFile = fileToPreview,
-                                            deleteVaultFileOnSuccess = true
-                                        )
-
-                                        withContext(Dispatchers.Main) {
-                                            isProgressVisible = false
-                                            if (res.isSuccess) {
-                                                Toast.makeText(context, "Restored to Gallery (${res.getOrNull()?.restoredFileName})", Toast.LENGTH_LONG).show()
-                                                selectedFile = null
-                                                decryptedContent = null
-                                                decryptedImageBitmap = null
-                                                decryptedVideoFile?.delete()
-                                                decryptedVideoFile = null
-                                                loadSecureFiles()
-                                            } else {
-                                                Toast.makeText(context, "Failed to restore: ${res.exceptionOrNull()?.message}", Toast.LENGTH_SHORT).show()
-                                            }
-                                        }
-                                    }
+                                    selectedFile = null
+                                    decryptedContent = null
                                 },
                                 shape = RoundedCornerShape(12.dp)
                             ) {
-                                Icon(Icons.Default.Restore, contentDescription = "Restore to Gallery", modifier = Modifier.size(18.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("Restore to Gallery")
+                                Text("Close")
                             }
-                        } else {
-                            Spacer(modifier = Modifier.width(8.dp))
-                        }
-
-                        Button(
-                            onClick = {
-                                selectedFile = null
-                                decryptedContent = null
-                                decryptedImageBitmap = null
-                                decryptedVideoFile?.delete()
-                                decryptedVideoFile = null
-                            },
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Text("Close")
                         }
                     }
                 }
@@ -1607,7 +1426,7 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
         }
     }
 
-    // Batch Delete Confirmation Dialog
+    // ── Batch Delete Confirm ──────────────────────────────────────────────────
     if (showBatchDeleteConfirm) {
         AlertDialog(
             onDismissRequest = { showBatchDeleteConfirm = false },
@@ -1616,103 +1435,86 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
             confirmButton = {
                 Button(
                     onClick = {
-                        val filesToDelete = currentTabFiles.filter { selectedFilePaths.contains(it.absolutePath) }
-                        filesToDelete.forEach { it.delete() }
-                        showBatchDeleteConfirm = false
-                        isSelectionMode = false
-                        selectedFilePaths = emptySet()
-                        loadSecureFiles()
+                        currentTabFiles.filter { selectedFilePaths.contains(it.absolutePath) }.forEach { it.delete() }
+                        showBatchDeleteConfirm = false; isSelectionMode = false; selectedFilePaths = emptySet(); loadSecureFiles()
                         Toast.makeText(context, "Files deleted from vault", Toast.LENGTH_SHORT).show()
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-                ) {
-                    Text("Delete")
-                }
+                ) { Text("Delete") }
             },
-            dismissButton = {
-                TextButton(onClick = { showBatchDeleteConfirm = false }) {
-                    Text("Cancel")
-                }
-            }
+            dismissButton = { TextButton(onClick = { showBatchDeleteConfirm = false }) { Text("Cancel") } }
         )
     }
 
-    // Create Encrypted Note Dialog
+    // ── Create Note Dialog ────────────────────────────────────────────────────
     if (showCreateDialog) {
         Dialog(onDismissRequest = { showCreateDialog = false }) {
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp),
-                shape = RoundedCornerShape(24.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(24.dp)
-                ) {
-                    Text(
-                        text = "New Encrypted Note",
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.height(16.dp))
-                    
-                    OutlinedTextField(
-                        value = newFileName,
-                        onValueChange = { newFileName = it },
-                        label = { Text("Note Title") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    
-                    Spacer(modifier = Modifier.height(12.dp))
-                    
-                    OutlinedTextField(
-                        value = newFileContent,
-                        onValueChange = { newFileContent = it },
-                        label = { Text("Note Content") },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(140.dp)
-                    )
-                    
-                    if (saveError != null) {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(saveError!!, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-                    }
-                    
-                    Spacer(modifier = Modifier.height(24.dp))
-                    
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.End
-                    ) {
-                        TextButton(onClick = { showCreateDialog = false }) {
-                            Text("Cancel")
-                        }
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Button(
-                            onClick = {
-                                if (newFileName.isBlank() || newFileContent.isBlank()) {
-                                    saveError = "Fields cannot be empty."
-                                } else {
-                                    try {
-                                        val dir = getVaultDir()
-                                        val file = File(dir, "${newFileName.trim()}.enc")
-                                        val encrypted = CryptoManager.encrypt(newFileContent)
-                                        file.writeText(encrypted, Charsets.UTF_8)
-                                        showCreateDialog = false
-                                        loadSecureFiles()
-                                    } catch (e: Exception) {
-                                        saveError = "Failed to encrypt/save note."
-                                    }
-                                }
+            Card(modifier = Modifier.fillMaxWidth().padding(16.dp), shape = RoundedCornerShape(24.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+                Column(modifier = Modifier.fillMaxWidth().padding(24.dp)) {
+                    Text("New Encrypted Note", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(16.dp))
+                    OutlinedTextField(value = newFileName, onValueChange = { newFileName = it }, label = { Text("Note Title") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(value = newFileContent, onValueChange = { newFileContent = it }, label = { Text("Note Content") }, modifier = Modifier.fillMaxWidth().height(140.dp))
+                    if (saveError != null) { Spacer(Modifier.height(8.dp)); Text(saveError!!, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+                    Spacer(Modifier.height(24.dp))
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                        TextButton(onClick = { showCreateDialog = false }) { Text("Cancel") }
+                        Spacer(Modifier.width(8.dp))
+                        Button(onClick = {
+                            if (newFileName.isBlank() || newFileContent.isBlank()) {
+                                saveError = "Fields cannot be empty."
+                            } else {
+                                try {
+                                    val dir = getVaultDir()
+                                    val file = File(dir, "${newFileName.trim()}.enc")
+                                    file.writeText(CryptoManager.encrypt(newFileContent), Charsets.UTF_8)
+                                    showCreateDialog = false; loadSecureFiles()
+                                } catch (e: Exception) { saveError = "Failed to encrypt/save note." }
                             }
-                        ) {
-                            Text("Encrypt & Save")
-                        }
+                        }) { Text("Encrypt & Save") }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ─── Reusable UI components ────────────────────────────────────────────────────
+
+@Composable
+private fun PinDots(filled: Int) {
+    Row(horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically) {
+        for (i in 1..4) {
+            Box(
+                modifier = Modifier
+                    .size(18.dp)
+                    .background(
+                        color = if (filled >= i) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                        shape = CircleShape
+                    )
+            )
+        }
+    }
+}
+
+@Composable
+private fun VaultKeypad(onKey: (String) -> Unit) {
+    val rows = listOf(listOf("1", "2", "3"), listOf("4", "5", "6"), listOf("7", "8", "9"), listOf("C", "0", "⌫"))
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        for (row in rows) {
+            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                for (key in row) {
+                    Button(
+                        onClick = { onKey(key) },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (key == "C" || key == "⌫") MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                            contentColor = if (key == "C" || key == "⌫") MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+                        ),
+                        shape = RoundedCornerShape(16.dp),
+                        modifier = Modifier.size(68.dp)
+                    ) {
+                        Text(key, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                     }
                 }
             }

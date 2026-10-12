@@ -1,6 +1,11 @@
 package com.example.presentation.screens.settings
 
 import android.content.Context
+import android.content.Intent
+import android.content.ComponentName
+import android.app.admin.DevicePolicyManager
+import com.example.receiver.DasmoDeviceAdminReceiver
+import com.example.util.MasterKeyManager
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -60,6 +65,17 @@ fun SettingsDialog(onDismiss: () -> Unit, context: Context) {
     var scrambleKeypad by remember { mutableStateOf(securePrefs.getString("scramble_keypad", "false") == "true") }
     var breakInSiren by remember { mutableStateOf(securePrefs.getString("break_in_siren", "false") == "true") }
     var preventScreenshots by remember { mutableStateOf(securePrefs.getString("prevent_screenshots", "true") == "true") }
+
+    // Uninstall Protection States
+    val dpm = remember { context.getSystemService(Context.DEVICE_POLICY_SERVICE) as? DevicePolicyManager }
+    val adminComponent = remember { ComponentName(context, DasmoDeviceAdminReceiver::class.java) }
+    val isDeviceAdminActive = remember { dpm?.isAdminActive(adminComponent) == true }
+    var uninstallProtection by remember {
+        mutableStateOf(securePrefs.getString("uninstall_protection", "false") == "true" && isDeviceAdminActive)
+    }
+    var showDisableProtectionConfirm by remember { mutableStateOf(false) }
+    var disablePinInput by remember { mutableStateOf("") }
+    var disablePinError by remember { mutableStateOf<String?>(null) }
 
     // Decoy PIN States
     val savedDecoyPin = remember { securePrefs.getString("decoy_pin", "") }
@@ -363,6 +379,67 @@ fun SettingsDialog(onDismiss: () -> Unit, context: Context) {
                                         onCheckedChange = {
                                             breakInSiren = it
                                             securePrefs.putString("break_in_siren", it.toString())
+                                        }
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            // Uninstall Protection
+                            Card(
+                                colors = CardDefaults.cardColors(
+                                    containerColor = if (uninstallProtection) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
+                                                     else MaterialTheme.colorScheme.surfaceVariant
+                                ),
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(12.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text("Uninstall Protection", fontWeight = FontWeight.SemiBold)
+                                            if (uninstallProtection) {
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Icon(
+                                                    imageVector = Icons.Default.Shield,
+                                                    contentDescription = "Active",
+                                                    tint = MaterialTheme.colorScheme.primary,
+                                                    modifier = Modifier.size(16.dp)
+                                                )
+                                            }
+                                        }
+                                        Text(
+                                            "Requires Master PIN to uninstall DASMO App Lock. Blocks package installers & disables system uninstall button.",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    Switch(
+                                        checked = uninstallProtection,
+                                        onCheckedChange = { enable ->
+                                            if (enable) {
+                                                val intent = Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN).apply {
+                                                    putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, adminComponent)
+                                                    putExtra(
+                                                        DevicePolicyManager.EXTRA_ADD_EXPLANATION,
+                                                        "Activate DASMO Uninstall Protection to prevent intruders from removing the app without your Master PIN."
+                                                    )
+                                                }
+                                                context.startActivity(intent)
+                                                uninstallProtection = true
+                                                securePrefs.putString("uninstall_protection", "true")
+                                            } else {
+                                                showDisableProtectionConfirm = true
+                                                disablePinInput = ""
+                                                disablePinError = null
+                                            }
                                         }
                                     )
                                 }
@@ -736,5 +813,74 @@ fun SettingsDialog(onDismiss: () -> Unit, context: Context) {
                 }
             }
         }
+    }
+
+    if (showDisableProtectionConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDisableProtectionConfirm = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.SecurityUpdateWarning,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.error
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Deactivate Uninstall Protection", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                }
+            },
+            text = {
+                Column {
+                    Text(
+                        "To turn off uninstall protection, enter your 4-digit Master PIN or Master Recovery Key (DASMO SUBHOJIT):",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Spacer(modifier = Modifier.height(14.dp))
+                    OutlinedTextField(
+                        value = disablePinInput,
+                        onValueChange = {
+                            disablePinInput = it
+                            disablePinError = null
+                        },
+                        label = { Text("Master PIN / Recovery Key") },
+                        isError = disablePinError != null,
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    if (disablePinError != null) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(disablePinError!!, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                    onClick = {
+                        val currentPin = securePrefs.getString("app_pin", "1234")
+                        if (disablePinInput == currentPin || MasterKeyManager.isMasterKey(disablePinInput)) {
+                            try {
+                                dpm?.removeActiveAdmin(adminComponent)
+                            } catch (e: Exception) {
+                                e.printStackTrace()
+                            }
+                            uninstallProtection = false
+                            securePrefs.putString("uninstall_protection", "false")
+                            showDisableProtectionConfirm = false
+                        } else {
+                            disablePinError = "Incorrect PIN or Master Key!"
+                        }
+                    }
+                ) {
+                    Text("Verify & Deactivate")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDisableProtectionConfirm = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 }

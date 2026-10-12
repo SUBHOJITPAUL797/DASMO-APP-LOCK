@@ -10,12 +10,12 @@ android {
   namespace = "com.example"
   compileSdk { version = release(36) { minorApiLevel = 1 } }
 
-  defaultConfig {
+    defaultConfig {
     applicationId = "dasmo.lock.subhojit"
     minSdk = 24
     targetSdk = 36
-    versionCode = 3
-    versionName = "1.0.2"
+    versionCode = 5
+    versionName = "1.0.4"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -41,7 +41,9 @@ android {
       }
     }
     create("debugConfig") {
-      storeFile = file("${rootDir}/debug.keystore")
+      val localDebug = file("${rootDir}/debug.keystore")
+      val userDebug = file("${System.getProperty("user.home")}/.android/debug.keystore")
+      storeFile = if (localDebug.exists()) localDebug else userDebug
       storePassword = "android"
       keyAlias = "androiddebugkey"
       keyPassword = "android"
@@ -106,6 +108,9 @@ dependencies {
   implementation(libs.coil.compose)
   implementation(libs.androidx.security.crypto)
   implementation(libs.androidx.biometric)
+  implementation(libs.androidx.media3.exoplayer)
+  implementation(libs.androidx.media3.ui)
+  implementation(libs.androidx.media3.datasource)
   implementation(libs.converter.moshi)
   implementation(libs.firebase.ai)
   implementation(libs.kotlinx.coroutines.android)

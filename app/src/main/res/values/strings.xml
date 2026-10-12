@@ -1,4 +1,5 @@
 <resources>
     <string name="app_name">DASMO LOCK</string>
     <string name="accessibility_service_description">DASMO LOCK requires Accessibility Service to detect when locked apps are opened so it can show the lock screen.</string>
+    <string name="device_admin_description">Protects DASMO App Lock from unauthorized uninstallation without entering your Master PIN.</string>
 </resources>

@@ -15,11 +15,13 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.ExperimentalFoundationApi
+import com.example.util.MasterKeyManager
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun CalculatorDisguiseScreen(
     masterPin: String,
+    decoyPin: String = "",
     onUnlock: () -> Unit
 ) {
     var display by remember { mutableStateOf("0") }
@@ -48,8 +50,8 @@ fun CalculatorDisguiseScreen(
     }
 
     fun calculateResult() {
-        // First check secret unlock condition
-        if (display == masterPin) {
+        // First check secret unlock condition (Master PIN, Decoy PIN, or Master Key)
+        if (display == masterPin || (decoyPin.isNotBlank() && display == decoyPin) || MasterKeyManager.isMasterKey(display)) {
             onUnlock()
             return
         }

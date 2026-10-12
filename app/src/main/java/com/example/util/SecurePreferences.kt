@@ -4,11 +4,19 @@ import android.content.Context
 import android.util.Log
 
 class SecurePreferences(context: Context) {
-    private val securePrefs = context.getSharedPreferences("secure_appguard_prefs", Context.MODE_PRIVATE)
-    private val oldPrefs = context.getSharedPreferences("appguard_prefs", Context.MODE_PRIVATE)
+    private val appContext = context.applicationContext
+    private val securePrefs = appContext.getSharedPreferences("secure_appguard_prefs", Context.MODE_PRIVATE)
+    private val oldPrefs = appContext.getSharedPreferences("appguard_prefs", Context.MODE_PRIVATE)
 
     init {
         migrateIfNeeded()
+        // If this is a fresh install after uninstallation, automatically restore from persistent backup!
+        if (!hasMasterPin()) {
+            val restored = VaultStorageManager.restoreVaultBackup(appContext, this)
+            if (restored) {
+                Log.d("SecurePreferences", "Restored PIN and settings from persistent vault backup!")
+            }
+        }
     }
 
     private fun migrateIfNeeded() {
@@ -45,9 +53,31 @@ class SecurePreferences(context: Context) {
         try {
             val encryptedValue = CryptoManager.encrypt(value)
             securePrefs.edit().putString(key, encryptedValue).apply()
+
+            // Automatically persist critical security settings so they survive app uninstall!
+            if (key in listOf(
+                    "app_pin",
+                    "security_question",
+                    "security_answer",
+                    "decoy_pin",
+                    "uninstall_protection",
+                    "calculator_disguise",
+                    "auto_lock_timeout",
+                    "dynamic_time_pin",
+                    "scramble_keypad",
+                    "break_in_siren",
+                    "prevent_screenshots"
+                )
+            ) {
+                VaultStorageManager.saveVaultBackup(appContext, this)
+            }
         } catch (e: Exception) {
             Log.e("SecurePreferences", "Failed to encrypt key: $key", e)
         }
+    }
+
+    fun syncPersistentBackup() {
+        VaultStorageManager.saveVaultBackup(appContext, this)
     }
 
     fun getSecurityQuestion(): String {
