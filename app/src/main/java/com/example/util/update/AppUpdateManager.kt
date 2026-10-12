@@ -109,8 +109,24 @@ class AppUpdateManager {
                     }
                 }
 
-                val currentVersionName = BuildConfig.VERSION_NAME
-                val currentVersionCode = BuildConfig.VERSION_CODE
+                val packageInfo = try {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        context.packageManager.getPackageInfo(context.packageName, android.content.pm.PackageManager.PackageInfoFlags.of(0))
+                    } else {
+                        @Suppress("DEPRECATION")
+                        context.packageManager.getPackageInfo(context.packageName, 0)
+                    }
+                } catch (e: Exception) {
+                    null
+                }
+
+                val currentVersionName = packageInfo?.versionName ?: BuildConfig.VERSION_NAME
+                val currentVersionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    packageInfo?.longVersionCode?.toInt() ?: BuildConfig.VERSION_CODE
+                } else {
+                    @Suppress("DEPRECATION")
+                    packageInfo?.versionCode ?: BuildConfig.VERSION_CODE
+                }
 
                 val cleanLatestVersion = cleanVersionTag(tagName)
                 val latestVersionCode = extractVersionCode(releaseBody, cleanLatestVersion)
@@ -302,18 +318,12 @@ class AppUpdateManager {
     }
 
     internal fun extractVersionCode(body: String, fallbackVer: String): Int {
-        val pattern = Pattern.compile("(?i)(?:versionCode|code|build)\\s*[:=]\\s*(\\d+)")
+        val pattern = Pattern.compile("(?i)(?:versionCode|code|build)[*`'\"\\s]*[:=][*`'\"\\s]*(\\d+)")
         val matcher = pattern.matcher(body)
         if (matcher.find()) {
-            return matcher.group(1)?.toIntOrNull() ?: 1
+            return matcher.group(1)?.toIntOrNull() ?: 0
         }
-        val parts = fallbackVer.split(".").mapNotNull { it.toIntOrNull() }
-        return when (parts.size) {
-            1 -> parts[0]
-            2 -> parts[0] * 1000 + parts[1]
-            3 -> parts[0] * 10000 + parts[1] * 100 + parts[2]
-            else -> 1
-        }
+        return 0
     }
 
     internal fun isNewerVersion(
@@ -322,12 +332,10 @@ class AppUpdateManager {
         latestVer: String,
         latestCode: Int
     ): Boolean {
-        if (latestCode > currentCode) return true
-        if (latestCode < currentCode && latestCode > 1) return false
-
         val currentClean = cleanVersionTag(currentVer)
         val latestClean = cleanVersionTag(latestVer)
 
+        // 1. Compare Semantic Version components (e.g. 1.0.4 vs 1.0.2)
         val currentParts = currentClean.split(".").map { it.toIntOrNull() ?: 0 }
         val latestParts = latestClean.split(".").map { it.toIntOrNull() ?: 0 }
 
@@ -337,6 +345,11 @@ class AppUpdateManager {
             val l = if (i < latestParts.size) latestParts[i] else 0
             if (l > c) return true
             if (l < c) return false
+        }
+
+        // 2. If SemVer versions are equal, check if latestCode is strictly higher than currentCode
+        if (latestCode > 0 && currentCode > 0 && latestCode > currentCode) {
+            return true
         }
 
         return false

@@ -13,14 +13,14 @@
 
 ---
 
-## 📋 GitHub Release Notes (v1.0.2)
+## 📋 GitHub Release Notes (v1.0.4)
 
 ```markdown
-# 🛡️ DASMO Lock v1.0.2 — Vault Media Restore to Gallery, Setup Wizard & Master Key Recovery
+# 🛡️ DASMO Lock v1.0.4 — Maximum Security: Entrance Lock, Uninstall Protection & Persistent Vault
 
 ### 🏷️ Metadata
-- **Version:** `v1.0.2`
-- **versionCode:** `3`
+- **Version:** `v1.0.4`
+- **versionCode:** `5`
 - **Package:** `dasmo.lock.subhojit`
 - **Channel:** Production (Stable)
 - **Minimum OS:** Android 7.0 (API Level 24)
@@ -31,20 +31,18 @@
 
 ### 🚀 Highlights & What's New
 
-- **🖼️ Restore Vault Photos & Videos to Gallery (Full Legacy Compatibility):**
-  Users can now easily restore any encrypted photo or video directly back to their device gallery (`Pictures/DASMO_Vault` and `Movies/DASMO_Vault`). Full backward compatibility for all legacy encrypted files with automatic magic-byte inspection, scoped `MediaStore` integration, and instant `MediaScannerConnection` indexing!
-- **✅ Multi-Select & Batch Media Management:**
-  Select multiple photos or videos at once to batch restore them to your gallery or batch delete them from the vault with real-time file counters!
-- **🔐 First-Time Vault Guided Setup Wizard:**
-  New installs now feature a guided 3-step setup wizard: Create Master PIN -> Confirm Master PIN -> Set Security Recovery Question & Answer.
-- **🔑 Universal Master Key Recovery ("DASMO SUBHOJIT"):**
-  Built-in emergency master recovery passphrase (`DASMO SUBHOJIT`) to unlock the vault or any locked app if the user forgets their PIN.
-- **🎨 Cryptographic & Lock Animations:**
-  Pulsing security shield with rotating neon cyan/purple ring during encryption and restoration, tactile bounce on keypad presses, and padlock morphing to green unlocked upon correct PIN entry.
-- **📱 Responsive Settings Dialog Across All Devices:**
-  Adaptive, full-height responsive dialog supporting all screen aspect ratios, foldables, tablets, and small screens with native `imePadding()` to prevent keyboard clipping.
-- **📦 In-App Package Installer Optimization:**
-  Direct permission granting loop for seamless 1-tap APK installation across all Android versions.
+- **🔐 Mandatory App Launch Authentication (Entrance Lock):**
+  DASMO App Lock now requires authentication immediately upon launching the app! No unauthenticated user can view locked apps, change settings, or access the vault. Re-locks automatically whenever the app is sent to the background (`ON_STOP`).
+- **🛡️ Device Administrator Uninstall Protection:**
+  Integrated Android `DevicePolicyManager` to disable and grey out the system "Uninstall" button in Android Settings and Launcher. Background service actively intercepts system package installer apps, demanding the Master PIN. Disabling uninstall protection requires Master PIN or Master Key override (`DASMO SUBHOJIT`).
+- **💾 Persistent Vault & Configuration Across Uninstallation:**
+  Encrypted files are stored in external persistent shared storage (`Documents/.dasmo_secure_vault` with `.nomedia`). Cryptographic engine uses deterministic PBKDF2WithHmacSHA256 AES-256 GCM key derivation, ensuring files remain 100% decryptable even after uninstalling and reinstalling the app!
+- **🔄 Auto-Restoring Configuration Backup:**
+  Settings, Master PIN, Security Recovery questions, and Decoy PIN are backed up in encrypted `.vault_config.enc`. Re-installing the app restores your PIN and vault contents automatically!
+- **🎯 Accurate In-App Update Engine:**
+  Fixed update checking logic using live installed `PackageManager` version and strict Semantic Versioning. Eliminates false-positive update prompts and ensures users are only notified when a genuine new version is released.
+- **⚡ Hardware-Accelerated Biometrics & Scrambled Keypad:**
+  Fast fingerprint/face authentication on app launch and randomized numeric layout to prevent shoulder-surfing.
 
 ---
 
@@ -52,39 +50,17 @@
 
 | File | Type | Target Architecture | Size | Checksum (SHA-256) |
 | :--- | :--- | :--- | :--- | :--- |
-| [`dasmo-applock-v1.0.2.apk`](https://github.com/SUBHOJITPAUL797/DASMO-APP-LOCK/releases/download/v1.0.2/dasmo-applock-v1.0.2.apk) | Production APK | Universal (arm64-v8a, armeabi-v7a, x86_64) | 17.9 MB | `4123b994b93bdcad0e4cf2e093b1b384401aa8b8cbab62cb7ba724c269216c59` |
-
----
-
-### 🛠️ Detailed Changelog
-
-#### 🖼️ Vault & Media Engine
-- Added `VaultRestoreManager` with MediaStore scoped storage (Android 10+) and public external storage fallback (Android 7-9).
-- Single-file "Restore to Gallery" button inside preview dialog.
-- Multi-selection mode for batch restoring and batch deleting photos and videos.
-- Upgraded file import to `ActivityResultContracts.GetMultipleContents()` to pick multiple media items at once.
-- Added animated `CryptoProgressModal` with pulsing shield, rotating neon border, file counter, and percentage bar.
-
-#### 🔑 Authentication & Recovery
-- Added `MasterKeyManager` supporting case-insensitive, normalized master recovery (`DASMO SUBHOJIT`).
-- First-time vault guided setup wizard in `SecureVaultScreen`.
-- Emergency recovery dialog with security question verification and master key override in both `LockActivity` and `SecureVaultScreen`.
-- Padlock morphing animation (`Lock` -> `LockOpen`) with smooth transition.
-
-#### ⚙️ Settings UI & Device Compatibility
-- Replaced cramped fixed-height dialog in `SettingsDialog` with adaptive `DialogProperties(usePlatformDefaultWidth = false)` container.
-- Added Security Recovery Question editor in Settings.
-- Added `WindowInsets.ime` padding to avoid on-screen keyboard overlap.
+| [`dasmo-lock-v1.0.4.apk`](https://github.com/SUBHOJITPAUL797/DASMO-APP-LOCK/releases/download/v1.0.4/dasmo-lock-v1.0.4.apk) | Production APK | Universal (arm64-v8a, armeabi-v7a, x86_64) | 19.6 MB | `16541570cad180e0503d1a248962d92f287edc4156d561c8ea91d22562fb9f1a` |
 ```
 
 ---
 
-## 🚀 Current Production Release: v1.0.2
+## 🚀 Current Production Release: v1.0.4
 
 ### Version Summary
-- **Tag:** `v1.0.2`
-- **Version Code:** `3`
-- **Version Name:** `1.0.2`
+- **Tag:** `v1.0.4`
+- **Version Code:** `5`
+- **Version Name:** `1.0.4`
 - **Status:** General Availability (GA)
 - **Repository:** `SUBHOJITPAUL797/DASMO-APP-LOCK`
-- **APK Checksum (SHA-256):** `4123b994b93bdcad0e4cf2e093b1b384401aa8b8cbab62cb7ba724c269216c59`
+- **APK Checksum (SHA-256):** `16541570cad180e0503d1a248962d92f287edc4156d561c8ea91d22562fb9f1a`
