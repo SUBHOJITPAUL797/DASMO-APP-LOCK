@@ -14,8 +14,8 @@ android {
     applicationId = "dasmo.lock.subhojit"
     minSdk = 24
     targetSdk = 36
-    versionCode = 2
-    versionName = "1.0.1"
+    versionCode = 3
+    versionName = "1.0.2"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -29,11 +29,15 @@ android {
         storePassword = System.getenv("STORE_PASSWORD") ?: "dasmo123"
         keyAlias = System.getenv("KEY_ALIAS") ?: "upload"
         keyPassword = System.getenv("KEY_PASSWORD") ?: "dasmo123"
+        enableV1Signing = true
+        enableV2Signing = true
       } else {
         storeFile = file("${rootDir}/debug.keystore")
         storePassword = "android"
         keyAlias = "androiddebugkey"
         keyPassword = "android"
+        enableV1Signing = true
+        enableV2Signing = true
       }
     }
     create("debugConfig") {

@@ -14,6 +14,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.LockOpen
+import com.example.util.MasterKeyManager
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -39,6 +41,7 @@ import androidx.compose.material.icons.filled.Warning
 import androidx.compose.ui.text.style.TextAlign
 import com.example.util.AlarmAlertHelper
 import com.example.util.SecurePreferences
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -160,8 +163,14 @@ fun LockScreenContent(modifier: Modifier = Modifier, packageName: String, appLab
 
     var pin by remember { mutableStateOf("") }
     var showFakeCrash by remember { mutableStateOf(isHidden) }
+    var showRecoveryDialog by remember { mutableStateOf(false) }
+    var recoveryInput by remember { mutableStateOf("") }
+    var recoveryError by remember { mutableStateOf<String?>(null) }
+    var isUnlocked by remember { mutableStateOf(false) }
+
     val securePrefs = remember { SecurePreferences(activity) }
     val correctPin = securePrefs.getString("app_pin", "1234")
+    val securityQuestion = remember { securePrefs.getSecurityQuestion() }
     val isDynamicPinEnabled = remember { securePrefs.getString("dynamic_time_pin", "false") == "true" }
     val isScrambleEnabled = remember { securePrefs.getString("scramble_keypad", "false") == "true" }
     val isSirenEnabled = remember { securePrefs.getString("break_in_siren", "false") == "true" }
@@ -209,6 +218,8 @@ fun LockScreenContent(modifier: Modifier = Modifier, packageName: String, appLab
 
             if (isSuccess) {
                 failedAttempts = 0
+                isUnlocked = true
+                kotlinx.coroutines.delay(350)
                 onUnlockSuccess()
             } else {
                 failedAttempts++
@@ -356,15 +367,15 @@ fun LockScreenContent(modifier: Modifier = Modifier, packageName: String, appLab
         ) {
             Surface(
                 shape = CircleShape,
-                color = androidx.compose.ui.graphics.Color(0xFF1E1333),
-                border = androidx.compose.foundation.BorderStroke(1.5.dp, androidx.compose.ui.graphics.Color(0xFF7E22CE)),
+                color = if (isUnlocked) androidx.compose.ui.graphics.Color(0xFF14532D) else androidx.compose.ui.graphics.Color(0xFF1E1333),
+                border = androidx.compose.foundation.BorderStroke(1.5.dp, if (isUnlocked) androidx.compose.ui.graphics.Color(0xFF22C55E) else androidx.compose.ui.graphics.Color(0xFF7E22CE)),
                 modifier = Modifier.size(68.dp)
             ) {
                 Box(contentAlignment = Alignment.Center) {
                     Icon(
-                        imageVector = Icons.Default.Lock,
-                        contentDescription = "Lock",
-                        tint = androidx.compose.ui.graphics.Color(0xFFC084FC),
+                        imageVector = if (isUnlocked) Icons.Default.LockOpen else Icons.Default.Lock,
+                        contentDescription = if (isUnlocked) "Unlocked" else "Lock",
+                        tint = if (isUnlocked) androidx.compose.ui.graphics.Color(0xFF4ADE80) else androidx.compose.ui.graphics.Color(0xFFC084FC),
                         modifier = Modifier.size(34.dp)
                     )
                 }
@@ -514,6 +525,117 @@ fun LockScreenContent(modifier: Modifier = Modifier, packageName: String, appLab
                     }
                 }
             }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            TextButton(
+                onClick = {
+                    recoveryInput = ""
+                    recoveryError = null
+                    showRecoveryDialog = true
+                }
+            ) {
+                Text(
+                    text = "Forgot PIN? / Emergency Recovery",
+                    color = androidx.compose.ui.graphics.Color(0xFFA855F7),
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
         }
+    }
+
+    if (showRecoveryDialog) {
+        val coroutineScope = rememberCoroutineScope()
+        AlertDialog(
+            onDismissRequest = { showRecoveryDialog = false },
+            title = {
+                Text(
+                    text = "Emergency Recovery",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        text = "Unlock $appLabel using the Universal Master Key or your security recovery answer.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    if (securityQuestion.isNotBlank()) {
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(10.dp)) {
+                                Text(
+                                    text = "Security Question:",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.secondary
+                                )
+                                Text(
+                                    text = securityQuestion,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+                        }
+                    }
+
+                    OutlinedTextField(
+                        value = recoveryInput,
+                        onValueChange = {
+                            recoveryInput = it
+                            recoveryError = null
+                        },
+                        label = { Text(if (securityQuestion.isNotBlank()) "Security Answer or Master Key" else "Master Recovery Key") },
+                        placeholder = { Text("Enter Master Key") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    if (recoveryError != null) {
+                        Text(
+                            text = recoveryError!!,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val isMaster = MasterKeyManager.isMasterKey(recoveryInput)
+                        val isSecAnswer = securityQuestion.isNotBlank() && securePrefs.verifySecurityAnswer(recoveryInput)
+
+                        if (isMaster || isSecAnswer) {
+                            showRecoveryDialog = false
+                            failedAttempts = 0
+                            isUnlocked = true
+                            coroutineScope.launch {
+                                kotlinx.coroutines.delay(350)
+                                onUnlockSuccess()
+                            }
+                        } else {
+                            recoveryError = "Invalid recovery credentials. Access Denied."
+                        }
+                    }
+                ) {
+                    Text("Unlock App")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRecoveryDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 }

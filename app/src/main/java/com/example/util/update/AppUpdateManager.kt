@@ -268,6 +268,15 @@ class AppUpdateManager {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
 
+        val resInfoList = context.packageManager.queryIntentActivities(
+            installIntent,
+            android.content.pm.PackageManager.MATCH_DEFAULT_ONLY
+        )
+        for (resolveInfo in resInfoList) {
+            val packageName = resolveInfo.activityInfo.packageName
+            context.grantUriPermission(packageName, contentUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+
         context.startActivity(installIntent)
     }
 

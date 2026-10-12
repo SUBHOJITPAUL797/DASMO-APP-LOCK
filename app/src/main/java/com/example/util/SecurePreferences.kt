@@ -23,6 +23,14 @@ class SecurePreferences(context: Context) {
         }
     }
 
+    fun contains(key: String): Boolean {
+        return securePrefs.contains(key)
+    }
+
+    fun hasMasterPin(): Boolean {
+        return securePrefs.contains("app_pin") && getString("app_pin", "").isNotBlank()
+    }
+
     fun getString(key: String, defaultValue: String): String {
         val encryptedValue = securePrefs.getString(key, null) ?: return defaultValue
         return try {
@@ -40,5 +48,20 @@ class SecurePreferences(context: Context) {
         } catch (e: Exception) {
             Log.e("SecurePreferences", "Failed to encrypt key: $key", e)
         }
+    }
+
+    fun getSecurityQuestion(): String {
+        return getString("security_question", "")
+    }
+
+    fun setSecurityRecovery(question: String, answer: String) {
+        putString("security_question", question.trim())
+        putString("security_answer", answer.trim().lowercase())
+    }
+
+    fun verifySecurityAnswer(inputAnswer: String): Boolean {
+        val saved = getString("security_answer", "")
+        if (saved.isBlank()) return false
+        return saved.equals(inputAnswer.trim().lowercase(), ignoreCase = true)
     }
 }

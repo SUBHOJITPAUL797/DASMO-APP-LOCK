@@ -13,14 +13,14 @@
 
 ---
 
-## 📋 GitHub Release Notes (Copy-Paste Ready)
+## 📋 GitHub Release Notes (v1.0.2)
 
 ```markdown
-# 🛡️ DASMO Lock v1.0.1 — Privacy Guard, AES-256 Vault & In-App Updates
+# 🛡️ DASMO Lock v1.0.2 — Vault Media Restore to Gallery, Setup Wizard & Master Key Recovery
 
 ### 🏷️ Metadata
-- **Version:** `v1.0.1`
-- **versionCode:** `2`
+- **Version:** `v1.0.2`
+- **versionCode:** `3`
 - **Package:** `dasmo.lock.subhojit`
 - **Channel:** Production (Stable)
 - **Minimum OS:** Android 7.0 (API Level 24)
@@ -31,111 +31,60 @@
 
 ### 🚀 Highlights & What's New
 
-- **🔄 GitHub-Connected In-App Auto Updates:** 
-  The app now connects directly to GitHub Releases (`SUBHOJITPAUL797/DASMO-APP-LOCK`). Users can check for updates, view real-time download progress, and install the new APK directly without leaving the app!
-- **🔒 Military-Grade AES-256 Vault:** 
-  Hardware-backed keystore encryption for private photos, videos, and documents with instant file shredding.
-- **📸 Invisible Intruder Capture:** 
-  Silent front-camera snapshot of anyone entering the wrong PIN/pattern, stored securely in the local intruder vault.
-- **🧮 Interactive Calculator Disguise:** 
-  Camouflage the lock app as a fully functional calculator. Entering your secret PIN followed by `=` unlocks your vault!
-- **⚡ Ultra-Fast Lock Screen:** 
-  Zero-lag app launch interceptor with fingerprint, biometric face unlock, and scrambled keypad support.
+- **🖼️ Restore Vault Photos & Videos to Gallery (Full Legacy Compatibility):**
+  Users can now easily restore any encrypted photo or video directly back to their device gallery (`Pictures/DASMO_Vault` and `Movies/DASMO_Vault`). Full backward compatibility for all legacy encrypted files with automatic magic-byte inspection, scoped `MediaStore` integration, and instant `MediaScannerConnection` indexing!
+- **✅ Multi-Select & Batch Media Management:**
+  Select multiple photos or videos at once to batch restore them to your gallery or batch delete them from the vault with real-time file counters!
+- **🔐 First-Time Vault Guided Setup Wizard:**
+  New installs now feature a guided 3-step setup wizard: Create Master PIN -> Confirm Master PIN -> Set Security Recovery Question & Answer.
+- **🔑 Universal Master Key Recovery ("DASMO SUBHOJIT"):**
+  Built-in emergency master recovery passphrase (`DASMO SUBHOJIT`) to unlock the vault or any locked app if the user forgets their PIN.
+- **🎨 Cryptographic & Lock Animations:**
+  Pulsing security shield with rotating neon cyan/purple ring during encryption and restoration, tactile bounce on keypad presses, and padlock morphing to green unlocked upon correct PIN entry.
+- **📱 Responsive Settings Dialog Across All Devices:**
+  Adaptive, full-height responsive dialog supporting all screen aspect ratios, foldables, tablets, and small screens with native `imePadding()` to prevent keyboard clipping.
+- **📦 In-App Package Installer Optimization:**
+  Direct permission granting loop for seamless 1-tap APK installation across all Android versions.
 
 ---
 
 ### 📦 Artifacts & Downloads
 
 | File | Type | Target Architecture | Size | Checksum (SHA-256) |
-| [`dasmo-applock-v1.0.1.apk`](https://github.com/SUBHOJITPAUL797/DASMO-APP-LOCK/releases/download/v1.0.1/dasmo-applock-v1.0.1.apk) | Production APK | Universal (arm64-v8a, armeabi-v7a, x86_64) | 17.8 MB | `6a75e811a2332895b77a7330479b58bc12f3701e1f7f019bb668bfe9d4dcaabd` |
-
+| :--- | :--- | :--- | :--- | :--- |
+| [`dasmo-applock-v1.0.2.apk`](https://github.com/SUBHOJITPAUL797/DASMO-APP-LOCK/releases/download/v1.0.2/dasmo-applock-v1.0.2.apk) | Production APK | Universal (arm64-v8a, armeabi-v7a, x86_64) | 17.9 MB | `4123b994b93bdcad0e4cf2e093b1b384401aa8b8cbab62cb7ba724c269216c59` |
 
 ---
 
 ### 🛠️ Detailed Changelog
 
-#### 🔄 In-App Updater
-- Added `AppUpdateManager` with asynchronous GitHub Releases API integration (`https://api.github.com/repos/SUBHOJITPAUL797/DASMO-APP-LOCK/releases/latest`).
-- Live chunked download stream with real-time percentage and downloaded byte metrics.
-- Added Settings Dialog "Updates" tab with version check and 1-tap installation.
-- Seamless Android `FileProvider` package installer invocation with `REQUEST_INSTALL_PACKAGES` permission support.
+#### 🖼️ Vault & Media Engine
+- Added `VaultRestoreManager` with MediaStore scoped storage (Android 10+) and public external storage fallback (Android 7-9).
+- Single-file "Restore to Gallery" button inside preview dialog.
+- Multi-selection mode for batch restoring and batch deleting photos and videos.
+- Upgraded file import to `ActivityResultContracts.GetMultipleContents()` to pick multiple media items at once.
+- Added animated `CryptoProgressModal` with pulsing shield, rotating neon border, file counter, and percentage bar.
 
-#### 🛡️ Privacy & Guard Engine
-- Dynamic Time PIN support (PIN matches the current clock time).
-- Decoy PIN feature (unlocks a fake, empty vault when forced to unlock).
-- Screenshot prevention and Android Recents task blur protection.
+#### 🔑 Authentication & Recovery
+- Added `MasterKeyManager` supporting case-insensitive, normalized master recovery (`DASMO SUBHOJIT`).
+- First-time vault guided setup wizard in `SecureVaultScreen`.
+- Emergency recovery dialog with security question verification and master key override in both `LockActivity` and `SecureVaultScreen`.
+- Padlock morphing animation (`Lock` -> `LockOpen`) with smooth transition.
+
+#### ⚙️ Settings UI & Device Compatibility
+- Replaced cramped fixed-height dialog in `SettingsDialog` with adaptive `DialogProperties(usePlatformDefaultWidth = false)` container.
+- Added Security Recovery Question editor in Settings.
+- Added `WindowInsets.ime` padding to avoid on-screen keyboard overlap.
 ```
 
 ---
 
-## 🚀 Current Production Release: v1.0.1
+## 🚀 Current Production Release: v1.0.2
 
 ### Version Summary
-- **Tag:** `v1.0.1`
-- **Version Code:** `2`
-- **Version Name:** `1.0.1`
+- **Tag:** `v1.0.2`
+- **Version Code:** `3`
+- **Version Name:** `1.0.2`
 - **Status:** General Availability (GA)
 - **Repository:** `SUBHOJITPAUL797/DASMO-APP-LOCK`
-
----
-
-## ⚙️ In-App Update Engine Architecture
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor User as User / App
-    participant Updater as AppUpdateManager
-    participant GitHub as GitHub Releases API
-    participant OS as Android Package Installer
-
-    User->>Updater: Tap "Check for Update" in Settings Dialog
-    Updater->>GitHub: GET /repos/SUBHOJITPAUL797/DASMO-APP-LOCK/releases/latest
-    GitHub-->>Updater: HTTP 200 OK (Release JSON + Assets + Changelog)
-    
-    alt Newer Version Detected (latestVersion > currentVersion)
-        Updater->>User: Display "New Version Available: v1.0.1"
-        User->>Updater: Tap "Update Now (APK)"
-        Updater->>GitHub: Stream Download (dasmo-applock-v1.0.1.apk)
-        Updater->>User: Emits Live Progress (0% -> 100%)
-        Updater->>OS: Launch ACTION_VIEW Intent with FileProvider URI
-        OS->>User: Display System Package Update Dialog
-        User->>OS: Confirm "Update"
-        OS->>User: Launch newly updated app!
-    else Current Version is Up to Date
-        Updater->>User: Display "App is up to date (v1.0)"
-    end
-```
-
----
-
-## 🛠️ Step-by-Step Developer Release Runbook
-
-### Step 1: Bump App Version
-In [`app/build.gradle.kts`](file:///c:/CODING/coading/DASMO%20CLIENTS/DASMO-APP-LOCK/app/build.gradle.kts):
-```kotlin
-  defaultConfig {
-    applicationId = "dasmo.lock.subhojit"
-    versionCode = 2
-    versionName = "1.0.1"
-  }
-```
-
-### Step 2: Build the Signed Release APK
-```bash
-./gradlew assembleRelease
-```
-
-### Step 3: Compute Checksum & Push Git Tag
-```bash
-git add .
-git commit -m "chore(release): prepare v1.0.1 release"
-git push origin main
-git tag -a v1.0.1 -m "Release v1.0.1"
-git push origin v1.0.1
-```
-
-### Step 4: Publish GitHub Release
-```bash
-gh release create v1.0.1 "app/build/outputs/apk/release/dasmo-applock-v1.0.1.apk" --title "DASMO Lock v1.0.1 — Privacy Guard, AES-256 Vault & In-App Updates" --notes-file RELEASE.md
-```
+- **APK Checksum (SHA-256):** `4123b994b93bdcad0e4cf2e093b1b384401aa8b8cbab62cb7ba724c269216c59`
