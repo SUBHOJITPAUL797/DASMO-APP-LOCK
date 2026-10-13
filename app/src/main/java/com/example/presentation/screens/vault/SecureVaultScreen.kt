@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.os.Build
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
@@ -549,6 +550,14 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
     var pendingDeletePaths by remember { mutableStateOf<List<String>>(emptyList()) }
     var showAllFilesAccessDialog by remember { mutableStateOf(false) }
     var pendingImportAction by remember { mutableStateOf<String?>(null) }
+    var hasAllFilesAccess by remember { mutableStateOf(VaultMediaCleaner.hasAllFilesAccess()) }
+
+    // Launcher for runtime media permissions (Android 13+ READ_MEDIA_IMAGES / VIDEO or READ_EXTERNAL_STORAGE)
+    val mediaPermissionsLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) {
+        hasAllFilesAccess = VaultMediaCleaner.hasAllFilesAccess()
+    }
 
     val dateFormatter = remember { SimpleDateFormat("MMM dd, yyyy HH:mm", Locale.getDefault()) }
     val correctPin = remember(hasMasterPin) { securePrefs.getString("app_pin", "") }
@@ -593,10 +602,10 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
                 VaultMediaCleaner.scanFilePaths(context, pendingDeletePaths)
                 pendingDeletePaths = emptyList()
             }
-            Toast.makeText(context, "Original media deleted from Gallery", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "Original media deleted from Gallery and Storage", Toast.LENGTH_SHORT).show()
         } else {
             pendingDeletePaths = emptyList()
-            Toast.makeText(context, "Media encrypted in vault", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "Media encrypted in vault (system deletion was cancelled)", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -835,7 +844,7 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
                         Toast.makeText(context, "$total photos securely encrypted in vault", Toast.LENGTH_SHORT).show()
                     }
                 } else {
-                    Toast.makeText(context, "$total photos encrypted and removed from gallery", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "$total photos encrypted and removed from gallery & file manager!", Toast.LENGTH_SHORT).show()
                 }
             }
         }
@@ -934,14 +943,51 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
                         Toast.makeText(context, "$total videos securely encrypted in vault", Toast.LENGTH_SHORT).show()
                     }
                 } else {
-                    Toast.makeText(context, "$total videos encrypted and removed from gallery", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "$total videos encrypted and removed from gallery & file manager!", Toast.LENGTH_SHORT).show()
                 }
             }
         }
     }
 
+    // ── Launcher for Android All Files Access settings ─────────────────────────
+    val manageStorageSettingsLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) {
+        val granted = VaultMediaCleaner.hasAllFilesAccess()
+        hasAllFilesAccess = granted
+        if (granted) {
+            Toast.makeText(context, "All Files Access granted! Auto-clean is active.", Toast.LENGTH_SHORT).show()
+            if (pendingImportAction == "photos") {
+                photosPickerLauncher.launch("image/*")
+            } else if (pendingImportAction == "videos") {
+                videosPickerLauncher.launch("video/*")
+            }
+        } else {
+            Toast.makeText(context, "Notice: Without All Files Access, system delete prompt is required.", Toast.LENGTH_LONG).show()
+            if (pendingImportAction == "photos") {
+                photosPickerLauncher.launch("image/*")
+            } else if (pendingImportAction == "videos") {
+                videosPickerLauncher.launch("video/*")
+            }
+        }
+        pendingImportAction = null
+    }
+
     LaunchedEffect(isUnlocked) {
-        if (isUnlocked) withContext(Dispatchers.IO) { loadSecureFiles() }
+        if (isUnlocked) {
+            withContext(Dispatchers.IO) { loadSecureFiles() }
+            hasAllFilesAccess = VaultMediaCleaner.hasAllFilesAccess()
+            val neededPerms = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                listOf(Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.READ_MEDIA_VIDEO)
+            } else {
+                listOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+            }.filter {
+                ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
+            }
+            if (neededPerms.isNotEmpty()) {
+                mediaPermissionsLauncher.launch(neededPerms.toTypedArray())
+            }
+        }
     }
 
     // ── Progress Modal overlay ────────────────────────────────────────────────
@@ -1327,6 +1373,54 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
                     text = { Text("Photos (${photosFiles.size})") }, icon = { Icon(Icons.Default.Image, contentDescription = "Photos") })
                 Tab(selected = activeTab == 2, onClick = { activeTab = 2; isSelectionMode = false; selectedFilePaths = emptySet() },
                     text = { Text("Videos (${videosFiles.size})") }, icon = { Icon(Icons.Default.Movie, contentDescription = "Videos") })
+            }
+
+            // Gallery Auto-Clean status banner
+            if (activeTab != 0 && !hasAllFilesAccess) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)),
+                    shape = RoundedCornerShape(14.dp),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.3f))
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Default.Security,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(28.dp)
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                "Auto-Clean Gallery & Files",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                "Enable All Files Access so imported media smoothly disappears from your gallery and file manager.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        Button(
+                            onClick = {
+                                pendingImportAction = null
+                                manageStorageSettingsLauncher.launch(VaultMediaCleaner.getAllFilesAccessIntent(context))
+                            },
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text("Enable", style = MaterialTheme.typography.labelMedium)
+                        }
+                    }
+                }
             }
 
             if (currentTabFiles.isEmpty()) {
@@ -1951,10 +2045,7 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
                 Button(
                     onClick = {
                         showAllFilesAccessDialog = false
-                        VaultMediaCleaner.openAllFilesAccessSettings(context)
-                        if (pendingImportAction == "photos") photosPickerLauncher.launch("image/*")
-                        else if (pendingImportAction == "videos") videosPickerLauncher.launch("video/*")
-                        pendingImportAction = null
+                        manageStorageSettingsLauncher.launch(VaultMediaCleaner.getAllFilesAccessIntent(context))
                     }
                 ) {
                     Text("Allow Access")

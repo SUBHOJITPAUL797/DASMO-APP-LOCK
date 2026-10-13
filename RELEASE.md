@@ -13,14 +13,14 @@
 
 ---
 
-## 📋 GitHub Release Notes (v1.0.6)
+## 📋 GitHub Release Notes (v1.0.7)
 
 ```markdown
-# 🛡️ DASMO Lock v1.0.6 — Bulletproof Gallery Auto-Purge & All-Files-Access Integration
+# 🛡️ DASMO Lock v1.0.7 — Seamless Gallery & File Manager Auto-Purge & UX Overhaul
 
 ### 🏷️ Metadata
-- **Version:** `v1.0.6`
-- **versionCode:** `7`
+- **Version:** `v1.0.7`
+- **versionCode:** `8`
 - **Package:** `dasmo.lock.subhojit`
 - **Channel:** Production (Stable)
 - **Minimum OS:** Android 7.0 (API Level 24)
@@ -31,14 +31,14 @@
 
 ### 🚀 Highlights & What's New
 
-- **🔒 Canonical MediaStore Resolution & Guaranteed Gallery Purge:**
-  Completely overhauled the media cleanup engine to resolve arbitrary picker and document URIs into canonical MediaStore entries (`content://media/external/images/media/<id>`) and real filesystem paths. Original media imported from the Gallery is deleted immediately via direct filesystem shredding and ContentResolver, followed by a forced `MediaScannerConnection` purge to evict cached thumbnails from the device gallery.
-- **⚡ All Files Access ("Auto-Clean") Support:**
-  Added optional one-time permission flow to grant All Files Access (`MANAGE_EXTERNAL_STORAGE`). When granted, DASMO deletes original media from storage and gallery silently and instantly without requiring repeated system popups.
-- **🛡️ Android 11+ (API 30+) Native Scoped Storage Deletion Fallback:**
-  When All Files Access is not granted, canonical MediaStore URIs are passed cleanly to `MediaStore.createDeleteRequest`, displaying Android's native confirmation dialog ("Allow DASMO to delete this photo?") without crashing or failing.
-- **📷 In-Vault Direct Private Camera:**
-  Snaps private photos and videos directly into AES-256 encrypted storage via isolated app cache without ever entering `DCIM/Camera` or the public gallery.
+- **✨ Seamless Gallery & File Manager Auto-Purge:**
+  Importing media from your gallery or file manager now automatically and smoothly removes the unencrypted originals from device storage (`DCIM/Camera`, `Pictures`, `Download`, etc.) and instantly flushes Android's `MediaScannerConnection` cache so photos disappear immediately from Gallery and Google Photos.
+- **⚡ Intuitive "Auto-Clean" Permission UX:**
+  Fixed premature picker launch race conditions. A one-tap "Enable" banner in the vault guides users cleanly to grant "All Files Access" (`MANAGE_EXTERNAL_STORAGE`). Once enabled, media cleanup happens instantly without repeated OS popups.
+- **🔍 Exhaustive On-Device Disk Search Engine:**
+  Added recursive, fast targeted disk scanning (`findFileOnDevice`) across camera, screenshots, downloads, and social media directories, matching by filename, metadata, and exact byte size.
+- **🛡️ Foolproof MediaStore Deletion & Scoped Storage Fallback:**
+  Automatically requests runtime media permissions (`READ_MEDIA_IMAGES` / `READ_MEDIA_VIDEO`) on Android 13+ to resolve canonical MediaStore URIs reliably. If All Files Access is not enabled, Android's native confirmation dialog (`createDeleteRequest`) triggers cleanly without silent failures.
 
 ---
 
@@ -46,16 +46,16 @@
 
 | File | Type | Target Architecture | Size | Checksum (SHA-256) |
 | :--- | :--- | :--- | :--- | :--- |
-| [`dasmo-lock-v1.0.6.apk`](https://github.com/SUBHOJITPAUL797/DASMO-APP-LOCK/releases/download/v1.0.6/dasmo-lock-v1.0.6.apk) | Production APK | Universal (arm64-v8a, armeabi-v7a, x86_64) | 19.6 MB | `83ADE4B2463383DB84418BE1535989D3211F200AC72FF586F1C9E461F2CF1570` |
+| [`dasmo-lock-v1.0.7.apk`](https://github.com/SUBHOJITPAUL797/DASMO-APP-LOCK/releases/download/v1.0.7/dasmo-lock-v1.0.7.apk) | Production APK | Universal (arm64-v8a, armeabi-v7a, x86_64) | 19.7 MB | `808504B4A96F0B2E984F536A2C6403B261AFB3A6C6A1D474B6FD2021D22ADBE0` |
 ```
 
 ---
 
-## 🚀 Current Production Release: v1.0.6
+## 🚀 Current Production Release: v1.0.7
 
 ### Version Summary
-- **Tag:** `v1.0.6`
-- **Version Code:** `7`
-- **Version Name:** `1.0.6`
+- **Tag:** `v1.0.7`
+- **Version Code:** `8`
+- **Version Name:** `1.0.7`
 - **Status:** General Availability (GA)
 - **Repository:** `SUBHOJITPAUL797/DASMO-APP-LOCK`
