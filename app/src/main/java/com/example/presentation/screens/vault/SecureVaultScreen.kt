@@ -546,6 +546,9 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
     var showVideoActionDialog by remember { mutableStateOf(false) }
     var tempCameraFile by remember { mutableStateOf<File?>(null) }
     var pendingCameraAction by remember { mutableStateOf<String?>(null) }
+    var pendingDeletePaths by remember { mutableStateOf<List<String>>(emptyList()) }
+    var showAllFilesAccessDialog by remember { mutableStateOf(false) }
+    var pendingImportAction by remember { mutableStateOf<String?>(null) }
 
     val dateFormatter = remember { SimpleDateFormat("MMM dd, yyyy HH:mm", Locale.getDefault()) }
     val correctPin = remember(hasMasterPin) { securePrefs.getString("app_pin", "") }
@@ -586,7 +589,14 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
         contract = ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
+            if (pendingDeletePaths.isNotEmpty()) {
+                VaultMediaCleaner.scanFilePaths(context, pendingDeletePaths)
+                pendingDeletePaths = emptyList()
+            }
             Toast.makeText(context, "Original media deleted from Gallery", Toast.LENGTH_SHORT).show()
+        } else {
+            pendingDeletePaths = emptyList()
+            Toast.makeText(context, "Media encrypted in vault", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -757,20 +767,13 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
             }
 
             val unDeletedUris = mutableListOf<Uri>()
+            val directlyDeletedPaths = mutableListOf<String>()
+            val consentPaths = mutableListOf<String>()
 
             uris.forEachIndexed { index, uri ->
                 try {
-                    var fileName = "photo_${System.currentTimeMillis()}_$index.jpg"
-                    val cursor = contentResolver.query(uri, null, null, null, null)
-                    cursor?.use { c ->
-                        if (c.moveToFirst()) {
-                            val nameIndex = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
-                            if (nameIndex != -1) {
-                                val original = c.getString(nameIndex)
-                                if (original.isNotEmpty()) fileName = original
-                            }
-                        }
-                    }
+                    val mediaEntry = VaultMediaCleaner.resolveCanonicalEntry(context, uri, isVideo = false)
+                    var fileName = if (mediaEntry.displayName.isNotBlank()) mediaEntry.displayName else "photo_${System.currentTimeMillis()}_$index.jpg"
                     if (!fileName.endsWith(".enc", ignoreCase = true)) fileName = "$fileName.enc"
 
                     val fileSize = fileSizes[index]
@@ -797,9 +800,17 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
                         grandProcessed += fileSize
 
                         // Automatically delete original unencrypted photo from device & gallery
-                        val isDeleted = VaultMediaCleaner.deleteOriginalMedia(context, uri)
-                        if (!isDeleted) {
-                            unDeletedUris.add(uri)
+                        val deleteResult = VaultMediaCleaner.deleteOriginalMedia(context, uri, mediaEntry)
+                        if (deleteResult.isDeleted) {
+                            if (!deleteResult.realPath.isNullOrBlank()) {
+                                directlyDeletedPaths.add(deleteResult.realPath)
+                            }
+                        } else {
+                            val targetUri = deleteResult.canonicalUri ?: uri
+                            unDeletedUris.add(targetUri)
+                            if (!deleteResult.realPath.isNullOrBlank()) {
+                                consentPaths.add(deleteResult.realPath)
+                            }
                         }
                     }
                 } catch (e: Exception) {
@@ -810,9 +821,15 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
             withContext(Dispatchers.Main) {
                 isProgressVisible = false
                 loadSecureFiles()
+
+                if (directlyDeletedPaths.isNotEmpty()) {
+                    VaultMediaCleaner.scanFilePaths(context, directlyDeletedPaths)
+                }
+
                 if (unDeletedUris.isNotEmpty()) {
                     val intentSender = VaultMediaCleaner.createSystemDeleteIntentSender(context, unDeletedUris)
                     if (intentSender != null) {
+                        pendingDeletePaths = consentPaths
                         deleteRequestLauncher.launch(IntentSenderRequest.Builder(intentSender).build())
                     } else {
                         Toast.makeText(context, "$total photos securely encrypted in vault", Toast.LENGTH_SHORT).show()
@@ -849,20 +866,13 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
             }
 
             val unDeletedUris = mutableListOf<Uri>()
+            val directlyDeletedPaths = mutableListOf<String>()
+            val consentPaths = mutableListOf<String>()
 
             uris.forEachIndexed { index, uri ->
                 try {
-                    var fileName = "video_${System.currentTimeMillis()}_$index.mp4"
-                    val cursor = contentResolver.query(uri, null, null, null, null)
-                    cursor?.use { c ->
-                        if (c.moveToFirst()) {
-                            val nameIndex = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
-                            if (nameIndex != -1) {
-                                val original = c.getString(nameIndex)
-                                if (original.isNotEmpty()) fileName = original
-                            }
-                        }
-                    }
+                    val mediaEntry = VaultMediaCleaner.resolveCanonicalEntry(context, uri, isVideo = true)
+                    var fileName = if (mediaEntry.displayName.isNotBlank()) mediaEntry.displayName else "video_${System.currentTimeMillis()}_$index.mp4"
                     if (!fileName.endsWith(".enc", ignoreCase = true)) fileName = "$fileName.enc"
 
                     val fileSize = fileSizes[index]
@@ -889,9 +899,17 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
                         grandProcessed += fileSize
 
                         // Automatically delete original unencrypted video from device & gallery
-                        val isDeleted = VaultMediaCleaner.deleteOriginalMedia(context, uri)
-                        if (!isDeleted) {
-                            unDeletedUris.add(uri)
+                        val deleteResult = VaultMediaCleaner.deleteOriginalMedia(context, uri, mediaEntry)
+                        if (deleteResult.isDeleted) {
+                            if (!deleteResult.realPath.isNullOrBlank()) {
+                                directlyDeletedPaths.add(deleteResult.realPath)
+                            }
+                        } else {
+                            val targetUri = deleteResult.canonicalUri ?: uri
+                            unDeletedUris.add(targetUri)
+                            if (!deleteResult.realPath.isNullOrBlank()) {
+                                consentPaths.add(deleteResult.realPath)
+                            }
                         }
                     }
                 } catch (e: Exception) {
@@ -902,9 +920,15 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
             withContext(Dispatchers.Main) {
                 isProgressVisible = false
                 loadSecureFiles()
+
+                if (directlyDeletedPaths.isNotEmpty()) {
+                    VaultMediaCleaner.scanFilePaths(context, directlyDeletedPaths)
+                }
+
                 if (unDeletedUris.isNotEmpty()) {
                     val intentSender = VaultMediaCleaner.createSystemDeleteIntentSender(context, unDeletedUris)
                     if (intentSender != null) {
+                        pendingDeletePaths = consentPaths
                         deleteRequestLauncher.launch(IntentSenderRequest.Builder(intentSender).build())
                     } else {
                         Toast.makeText(context, "$total videos securely encrypted in vault", Toast.LENGTH_SHORT).show()
@@ -1738,7 +1762,12 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
                     Surface(
                         onClick = {
                             showPhotoActionDialog = false
-                            photosPickerLauncher.launch("image/*")
+                            if (!VaultMediaCleaner.hasAllFilesAccess()) {
+                                pendingImportAction = "photos"
+                                showAllFilesAccessDialog = true
+                            } else {
+                                photosPickerLauncher.launch("image/*")
+                            }
                         },
                         shape = RoundedCornerShape(12.dp),
                         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
@@ -1841,7 +1870,12 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
                     Surface(
                         onClick = {
                             showVideoActionDialog = false
-                            videosPickerLauncher.launch("video/*")
+                            if (!VaultMediaCleaner.hasAllFilesAccess()) {
+                                pendingImportAction = "videos"
+                                showAllFilesAccessDialog = true
+                            } else {
+                                videosPickerLauncher.launch("video/*")
+                            }
                         },
                         shape = RoundedCornerShape(12.dp),
                         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
@@ -1879,6 +1913,63 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
             dismissButton = {
                 TextButton(onClick = { showVideoActionDialog = false }) {
                     Text("Cancel")
+                }
+            }
+        )
+    }
+
+    // ── All Files Access Explanation Dialog ──────────────────────────────────
+    if (showAllFilesAccessDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                showAllFilesAccessDialog = false
+                if (pendingImportAction == "photos") photosPickerLauncher.launch("image/*")
+                else if (pendingImportAction == "videos") videosPickerLauncher.launch("video/*")
+                pendingImportAction = null
+            },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Security, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.width(10.dp))
+                    Text("Auto-Clean Gallery", fontWeight = FontWeight.Bold)
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "To automatically remove encrypted photos and videos from your gallery without showing an OS confirmation popup every time, DASMO needs 'All files access'.",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        "Tap 'Allow Access' to enable automatic cleanup in Settings, or tap 'Continue' to approve deletions via Android system dialog.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showAllFilesAccessDialog = false
+                        VaultMediaCleaner.openAllFilesAccessSettings(context)
+                        if (pendingImportAction == "photos") photosPickerLauncher.launch("image/*")
+                        else if (pendingImportAction == "videos") videosPickerLauncher.launch("video/*")
+                        pendingImportAction = null
+                    }
+                ) {
+                    Text("Allow Access")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showAllFilesAccessDialog = false
+                        if (pendingImportAction == "photos") photosPickerLauncher.launch("image/*")
+                        else if (pendingImportAction == "videos") videosPickerLauncher.launch("video/*")
+                        pendingImportAction = null
+                    }
+                ) {
+                    Text("Continue")
                 }
             }
         )

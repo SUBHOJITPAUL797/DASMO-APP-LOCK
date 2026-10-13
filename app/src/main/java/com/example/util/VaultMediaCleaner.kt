@@ -3,6 +3,7 @@ package com.example.util
 import android.app.RecoverableSecurityException
 import android.content.ContentUris
 import android.content.Context
+import android.content.Intent
 import android.content.IntentSender
 import android.media.MediaScannerConnection
 import android.net.Uri
@@ -10,244 +11,350 @@ import android.os.Build
 import android.os.Environment
 import android.provider.DocumentsContract
 import android.provider.MediaStore
+import android.provider.OpenableColumns
+import android.provider.Settings
 import android.util.Log
 import java.io.File
 
 object VaultMediaCleaner {
     private const val TAG = "VaultMediaCleaner"
 
-    /**
-     * Resolves the real absolute filesystem path of a media URI if possible.
-     */
-    fun resolveRealPath(context: Context, uri: Uri): String? {
-        val contentResolver = context.contentResolver
+    data class MediaEntry(
+        val canonicalUri: Uri?,
+        val realPath: String?,
+        val displayName: String
+    )
 
-        // 1. Try DocumentsContract if it's a document URI
+    data class DeleteResult(
+        val isDeleted: Boolean,
+        val canonicalUri: Uri?,
+        val realPath: String?
+    )
+
+    /**
+     * Checks if the app has full external storage management access (Android 11+).
+     */
+    fun hasAllFilesAccess(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Environment.isExternalStorageManager()
+        } else {
+            true
+        }
+    }
+
+    /**
+     * Opens Android System Settings to grant All Files Access to DASMO.
+     */
+    fun openAllFilesAccessSettings(context: Context) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                    data = Uri.parse("package:${context.packageName}")
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(intent)
+            } catch (e: Exception) {
+                try {
+                    val fallback = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    context.startActivity(fallback)
+                } catch (ex: Exception) {
+                    Log.e(TAG, "Cannot open storage settings", ex)
+                }
+            }
+        }
+    }
+
+    /**
+     * Resolves any input content URI (PhotoPicker, DocumentsProvider, MediaStore, Google Photos)
+     * into a canonical MediaStore URI and absolute filesystem path.
+     */
+    fun resolveCanonicalEntry(context: Context, uri: Uri, isVideo: Boolean): MediaEntry {
+        val contentResolver = context.contentResolver
+        var displayName = ""
+        var size = 0L
+        var candidateId: Long? = null
+        var candidatePath: String? = null
+
+        // 1. Query the input URI for basic metadata (DISPLAY_NAME, SIZE, DATA)
+        try {
+            contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (nameIdx != -1) displayName = cursor.getString(nameIdx) ?: ""
+
+                    val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
+                    if (sizeIdx != -1) size = cursor.getLong(sizeIdx)
+
+                    val dataIdx = cursor.getColumnIndex(MediaStore.MediaColumns.DATA)
+                    if (dataIdx != -1) candidatePath = cursor.getString(dataIdx)
+
+                    val idIdx = cursor.getColumnIndex(MediaStore.MediaColumns._ID)
+                    if (idIdx != -1) candidateId = cursor.getLong(idIdx)
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Query metadata on $uri failed: ${e.message}")
+        }
+
+        // 2. Extract numeric ID from URI path if possible (e.g. photo picker uri: .../media/1000000035)
+        if (candidateId == null) {
+            candidateId = uri.lastPathSegment?.toLongOrNull()
+        }
+
+        // 3. Inspect documentId if it's a DocumentsContract URI
         if (DocumentsContract.isDocumentUri(context, uri)) {
             try {
                 val docId = DocumentsContract.getDocumentId(uri)
                 if (docId != null && docId.contains(":")) {
                     val split = docId.split(":")
                     val type = split[0]
-                    val id = split[1]
+                    val rest = split[1]
 
-                    // External storage provider e.g. "primary:DCIM/Camera/IMG_001.jpg"
                     if (type.equals("primary", ignoreCase = true)) {
-                        val path = "${Environment.getExternalStorageDirectory().absolutePath}/$id"
-                        val f = File(path)
-                        if (f.exists()) return f.absolutePath
+                        candidatePath = "${Environment.getExternalStorageDirectory().absolutePath}/$rest"
+                    } else if (rest.startsWith("raw:", ignoreCase = true)) {
+                        candidatePath = rest.substring(4)
+                    } else {
+                        val numId = rest.toLongOrNull()
+                        if (numId != null) candidateId = numId
                     }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Parsing docId failed: ${e.message}")
+            }
+        }
 
-                    // Raw path e.g. "raw:/storage/emulated/0/..."
-                    if (id.startsWith("raw:", ignoreCase = true)) {
-                        val rawPath = id.substring(4)
-                        if (File(rawPath).exists()) return rawPath
+        val collection = if (isVideo) {
+            MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+        } else {
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+        }
+
+        // 4. Strategy A: Query MediaStore by candidateId
+        if (candidateId != null && candidateId!! > 0) {
+            val candidateUri = ContentUris.withAppendedId(collection, candidateId!!)
+            try {
+                contentResolver.query(
+                    collection,
+                    arrayOf(MediaStore.MediaColumns._ID, MediaStore.MediaColumns.DATA, MediaStore.MediaColumns.DISPLAY_NAME),
+                    "${MediaStore.MediaColumns._ID}=?",
+                    arrayOf(candidateId.toString()),
+                    null
+                )?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val dataIdx = cursor.getColumnIndex(MediaStore.MediaColumns.DATA)
+                        val path = if (dataIdx != -1) cursor.getString(dataIdx) else null
+                        val nameIdx = cursor.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME)
+                        val name = if (nameIdx != -1) cursor.getString(nameIdx) else displayName
+                        return MediaEntry(candidateUri, path ?: candidatePath, name.ifBlank { displayName })
                     }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Query by ID failed: ${e.message}")
+            }
+        }
 
-                    // Numeric media ID e.g. "image:12345" or "video:12345"
-                    val mediaId = id.toLongOrNull()
-                    if (mediaId != null) {
-                        val contentUri = when {
-                            type.contains("video", ignoreCase = true) || uri.toString().contains("video") ->
-                                MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-                            else -> MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-                        }
-                        val selection = "${MediaStore.MediaColumns._ID}=?"
-                        val selectionArgs = arrayOf(mediaId.toString())
+        // 5. Strategy B: Query MediaStore by candidatePath
+        if (!candidatePath.isNullOrBlank()) {
+            try {
+                contentResolver.query(
+                    collection,
+                    arrayOf(MediaStore.MediaColumns._ID, MediaStore.MediaColumns.DATA, MediaStore.MediaColumns.DISPLAY_NAME),
+                    "${MediaStore.MediaColumns.DATA}=?",
+                    arrayOf(candidatePath),
+                    null
+                )?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val id = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID))
+                        val nameIdx = cursor.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME)
+                        val name = if (nameIdx != -1) cursor.getString(nameIdx) else displayName
+                        return MediaEntry(ContentUris.withAppendedId(collection, id), candidatePath, name.ifBlank { displayName })
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Query by DATA failed: ${e.message}")
+            }
+        }
 
+        // 6. Strategy C: Query MediaStore by DISPLAY_NAME and SIZE
+        if (displayName.isNotBlank() && size > 0) {
+            try {
+                contentResolver.query(
+                    collection,
+                    arrayOf(MediaStore.MediaColumns._ID, MediaStore.MediaColumns.DATA),
+                    "${MediaStore.MediaColumns.DISPLAY_NAME}=? AND ${MediaStore.MediaColumns.SIZE}=?",
+                    arrayOf(displayName, size.toString()),
+                    null
+                )?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val id = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID))
+                        val dataIdx = cursor.getColumnIndex(MediaStore.MediaColumns.DATA)
+                        val path = if (dataIdx != -1) cursor.getString(dataIdx) else candidatePath
+                        return MediaEntry(ContentUris.withAppendedId(collection, id), path, displayName)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Query by name+size failed: ${e.message}")
+            }
+        }
+
+        // 7. Strategy D: Query MediaStore by DISPLAY_NAME alone
+        if (displayName.isNotBlank()) {
+            try {
+                contentResolver.query(
+                    collection,
+                    arrayOf(MediaStore.MediaColumns._ID, MediaStore.MediaColumns.DATA),
+                    "${MediaStore.MediaColumns.DISPLAY_NAME}=?",
+                    arrayOf(displayName),
+                    "${MediaStore.MediaColumns.DATE_MODIFIED} DESC"
+                )?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val id = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID))
+                        val dataIdx = cursor.getColumnIndex(MediaStore.MediaColumns.DATA)
+                        val path = if (dataIdx != -1) cursor.getString(dataIdx) else candidatePath
+                        return MediaEntry(ContentUris.withAppendedId(collection, id), path, displayName)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Query by name failed: ${e.message}")
+            }
+        }
+
+        // 8. Strategy E: Check standard device directories for displayName
+        if (displayName.isNotBlank()) {
+            val commonDirs = listOf(
+                File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM), "Camera"),
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM),
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES),
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+            )
+            for (dir in commonDirs) {
+                val candidateFile = File(dir, displayName)
+                if (candidateFile.exists()) {
+                    candidatePath = candidateFile.absolutePath
+                    try {
                         contentResolver.query(
-                            contentUri,
-                            arrayOf(MediaStore.MediaColumns.DATA),
-                            selection,
-                            selectionArgs,
+                            collection,
+                            arrayOf(MediaStore.MediaColumns._ID),
+                            "${MediaStore.MediaColumns.DATA}=?",
+                            arrayOf(candidateFile.absolutePath),
                             null
                         )?.use { cursor ->
-                            val col = cursor.getColumnIndex(MediaStore.MediaColumns.DATA)
-                            if (col != -1 && cursor.moveToFirst()) {
-                                val path = cursor.getString(col)
-                                if (!path.isNullOrBlank()) return path
+                            if (cursor.moveToFirst()) {
+                                val id = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID))
+                                return MediaEntry(ContentUris.withAppendedId(collection, id), candidateFile.absolutePath, displayName)
                             }
                         }
-                    }
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed parsing document ID: ${e.message}")
-            }
-        }
-
-        // 2. Try standard MediaStore query for DATA column
-        try {
-            contentResolver.query(uri, arrayOf(MediaStore.MediaColumns.DATA), null, null, null)?.use { cursor ->
-                val col = cursor.getColumnIndex(MediaStore.MediaColumns.DATA)
-                if (col != -1 && cursor.moveToFirst()) {
-                    val path = cursor.getString(col)
-                    if (!path.isNullOrBlank()) return path
+                    } catch (_: Exception) {}
+                    return MediaEntry(null, candidateFile.absolutePath, displayName)
                 }
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed querying DATA column: ${e.message}")
         }
 
-        // 3. If URI has a file scheme
-        if (uri.scheme == "file") {
-            return uri.path
+        // Fallback: If uri is already canonical MediaStore URI
+        val fallbackCanonical = if (uri.authority == "media" && (uri.path?.contains("/images/media") == true || uri.path?.contains("/video/media") == true)) {
+            uri
+        } else {
+            null
         }
 
-        return null
+        return MediaEntry(fallbackCanonical, candidatePath, displayName)
     }
 
     /**
-     * Finds a MediaStore content URI matching a given filesystem path.
+     * Deletes the original unencrypted media from device storage and gallery.
+     * Uses direct file deletion, ContentResolver deletion, and MediaScanner eviction.
      */
-    fun findMediaStoreUriForPath(context: Context, path: String): Uri? {
-        val isVideo = path.endsWith(".mp4", ignoreCase = true) ||
-                path.endsWith(".mkv", ignoreCase = true) ||
-                path.endsWith(".3gp", ignoreCase = true)
-        val contentUri = if (isVideo) MediaStore.Video.Media.EXTERNAL_CONTENT_URI else MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-        val projection = arrayOf(MediaStore.MediaColumns._ID)
-        val selection = "${MediaStore.MediaColumns.DATA}=?"
-        val selectionArgs = arrayOf(path)
-
-        try {
-            context.contentResolver.query(contentUri, projection, selection, selectionArgs, null)?.use { cursor ->
-                if (cursor.moveToFirst()) {
-                    val id = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID))
-                    return ContentUris.withAppendedId(contentUri, id)
-                }
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "findMediaStoreUriForPath failed: ${e.message}")
-        }
-        return null
-    }
-
-    /**
-     * Converts a Document URI or generic content URI to a direct MediaStore content URI if possible.
-     */
-    fun toMediaStoreUri(context: Context, uri: Uri): Uri {
-        if (uri.authority == "media" || uri.toString().startsWith("content://media/")) {
-            return uri
-        }
-
-        if (DocumentsContract.isDocumentUri(context, uri)) {
-            try {
-                val docId = DocumentsContract.getDocumentId(uri)
-                if (docId != null && docId.contains(":")) {
-                    val split = docId.split(":")
-                    val type = split[0].lowercase()
-                    val id = split[1].toLongOrNull()
-                    if (id != null) {
-                        return if (type.contains("video") || uri.toString().contains("video")) {
-                            ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id)
-                        } else {
-                            ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Error converting to MediaStore URI: ${e.message}")
-            }
-        }
-
-        val realPath = resolveRealPath(context, uri)
-        if (!realPath.isNullOrBlank()) {
-            val foundUri = findMediaStoreUriForPath(context, realPath)
-            if (foundUri != null) return foundUri
-        }
-
-        return uri
-    }
-
-    /**
-     * Attempts to delete the original unencrypted media from device storage and gallery.
-     * Tries DocumentsContract deletion, direct file deletion, ContentResolver deletion,
-     * and forces MediaScanner to update gallery thumbnails.
-     * Returns true if deleted immediately, false if system confirmation is required.
-     */
-    fun deleteOriginalMedia(context: Context, uri: Uri): Boolean {
+    fun deleteOriginalMedia(context: Context, uri: Uri, entry: MediaEntry): DeleteResult {
         var isDeleted = false
         val contentResolver = context.contentResolver
-        val realPath = resolveRealPath(context, uri)
-        val mediaStoreUri = toMediaStoreUri(context, uri)
+        val path = entry.realPath
 
-        // 1. Try DocumentsContract.deleteDocument if it's a Document URI
-        if (DocumentsContract.isDocumentUri(context, uri)) {
+        // 1. Direct file deletion (works 100% when MANAGE_EXTERNAL_STORAGE is granted or on Android 9/10)
+        if (!path.isNullOrBlank()) {
             try {
-                if (DocumentsContract.deleteDocument(contentResolver, uri)) {
-                    isDeleted = true
-                    Log.d(TAG, "DocumentsContract deleted document: $uri")
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "DocumentsContract.deleteDocument failed: ${e.message}")
-            }
-        }
-
-        // 2. Try direct file deletion if path was resolved
-        if (!realPath.isNullOrBlank()) {
-            try {
-                val file = File(realPath)
+                val file = File(path)
                 if (file.exists() && file.delete()) {
                     isDeleted = true
-                    Log.d(TAG, "Deleted original file directly: $realPath")
+                    Log.d(TAG, "Direct File.delete succeeded: $path")
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "Direct file deletion failed: ${e.message}")
+                Log.w(TAG, "Direct File.delete failed: ${e.message}")
             }
         }
 
-        // 3. Try deleting via ContentResolver with the MediaStore URI
-        try {
-            val rows = contentResolver.delete(mediaStoreUri, null, null)
-            if (rows > 0) {
-                isDeleted = true
-                Log.d(TAG, "ContentResolver deleted $rows rows for $mediaStoreUri")
-            }
-        } catch (e: RecoverableSecurityException) {
-            Log.d(TAG, "RecoverableSecurityException on delete: user consent required")
-            return false
-        } catch (e: Exception) {
-            Log.w(TAG, "ContentResolver.delete failed: ${e.message}")
-        }
-
-        // 4. Fallback: Try original URI if different
-        if (!isDeleted && mediaStoreUri != uri) {
+        // 2. ContentResolver deletion using canonical MediaStore URI
+        val canonicalUri = entry.canonicalUri
+        if (canonicalUri != null) {
             try {
-                val rows = contentResolver.delete(uri, null, null)
-                if (rows > 0) isDeleted = true
+                val rows = contentResolver.delete(canonicalUri, null, null)
+                if (rows > 0) {
+                    isDeleted = true
+                    Log.d(TAG, "ContentResolver.delete succeeded on $canonicalUri ($rows rows)")
+                }
+            } catch (e: RecoverableSecurityException) {
+                Log.d(TAG, "RecoverableSecurityException on delete: user consent required")
+            } catch (e: SecurityException) {
+                Log.d(TAG, "SecurityException on delete: user consent required (Android 11+)")
+            } catch (e: Exception) {
+                Log.w(TAG, "ContentResolver.delete failed: ${e.message}")
+            }
+        }
+
+        // 3. Fallback: try original URI if different and not deleted yet
+        if (!isDeleted && uri != canonicalUri) {
+            try {
+                if (DocumentsContract.isDocumentUri(context, uri)) {
+                    if (DocumentsContract.deleteDocument(contentResolver, uri)) {
+                        isDeleted = true
+                    }
+                } else {
+                    val rows = contentResolver.delete(uri, null, null)
+                    if (rows > 0) isDeleted = true
+                }
             } catch (_: Exception) {}
         }
 
-        // 5. Force MediaScanner to purge thumbnail and index from Gallery
-        if (!realPath.isNullOrBlank()) {
+        // 4. Force MediaScanner to immediately evict thumbnail and index from Gallery
+        if (isDeleted && !path.isNullOrBlank()) {
             try {
-                MediaScannerConnection.scanFile(
-                    context,
-                    arrayOf(realPath),
-                    null
-                ) { path, scannedUri ->
-                    Log.d(TAG, "MediaScanner updated after deletion: $path, uri: $scannedUri")
+                MediaScannerConnection.scanFile(context, arrayOf(path), null) { scannedPath, _ ->
+                    Log.d(TAG, "MediaScanner evicted: $scannedPath")
                 }
-            } catch (e: Exception) {
-                Log.w(TAG, "MediaScanner scanFile failed: ${e.message}")
-            }
+            } catch (_: Exception) {}
         }
 
-        return isDeleted
+        return DeleteResult(
+            isDeleted = isDeleted,
+            canonicalUri = canonicalUri,
+            realPath = path
+        )
     }
 
     /**
      * Creates a system delete confirmation intent sender for Android 11+ (API 30+)
-     * when silent deletion is blocked by OS Scoped Storage rules.
+     * using canonical MediaStore URIs.
      */
     fun createSystemDeleteIntentSender(context: Context, uris: List<Uri>): IntentSender? {
         if (uris.isEmpty()) return null
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             try {
-                val mediaStoreUris = uris.map { toMediaStoreUri(context, it) }
-                    .filter { it.authority == "media" || it.toString().startsWith("content://media/") }
-                if (mediaStoreUris.isNotEmpty()) {
-                    MediaStore.createDeleteRequest(context.contentResolver, mediaStoreUris).intentSender
+                val validUris = uris.mapNotNull { uri ->
+                    if (uri.authority == "media" && (uri.path?.contains("/images/media") == true || uri.path?.contains("/video/media") == true)) {
+                        uri
+                    } else {
+                        resolveCanonicalEntry(context, uri, uri.toString().contains("video")).canonicalUri
+                    }
+                }.distinct()
+
+                if (validUris.isNotEmpty()) {
+                    Log.d(TAG, "Creating MediaStore.createDeleteRequest for ${validUris.size} canonical URIs")
+                    MediaStore.createDeleteRequest(context.contentResolver, validUris).intentSender
                 } else {
+                    Log.w(TAG, "No valid canonical MediaStore URIs available for delete request")
                     null
                 }
             } catch (e: Exception) {
@@ -256,6 +363,20 @@ object VaultMediaCleaner {
             }
         } else {
             null
+        }
+    }
+
+    /**
+     * Batch scans filesystem paths with MediaScannerConnection to update Gallery caches.
+     */
+    fun scanFilePaths(context: Context, paths: List<String>) {
+        if (paths.isEmpty()) return
+        try {
+            MediaScannerConnection.scanFile(context, paths.toTypedArray(), null) { path, uri ->
+                Log.d(TAG, "Scanned: $path, uri: $uri")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "scanFilePaths failed: ${e.message}")
         }
     }
 }

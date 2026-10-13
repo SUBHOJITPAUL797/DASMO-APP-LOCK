@@ -13,14 +13,14 @@
 
 ---
 
-## 📋 GitHub Release Notes (v1.0.5)
+## 📋 GitHub Release Notes (v1.0.6)
 
 ```markdown
-# 🛡️ DASMO Lock v1.0.5 — Vault Privacy Fix & Direct In-Vault Private Camera
+# 🛡️ DASMO Lock v1.0.6 — Bulletproof Gallery Auto-Purge & All-Files-Access Integration
 
 ### 🏷️ Metadata
-- **Version:** `v1.0.5`
-- **versionCode:** `6`
+- **Version:** `v1.0.6`
+- **versionCode:** `7`
 - **Package:** `dasmo.lock.subhojit`
 - **Channel:** Production (Stable)
 - **Minimum OS:** Android 7.0 (API Level 24)
@@ -31,12 +31,14 @@
 
 ### 🚀 Highlights & What's New
 
-- **🔒 Auto-Purge Original Photos/Videos from Gallery:**
-  Resolved privacy issue where imported photos and videos previously remained visible in the device's public Gallery or Google Photos. Upon AES-256 encryption into the Secure Vault, DASMO automatically shreds the original file from storage, removes it from the MediaStore index, and triggers a full `MediaScannerConnection` refresh to immediately evict cached gallery thumbnails. Supports Android 11+ Scoped Storage batch deletion request fallback.
-- **📷 In-Vault Direct Private Camera (Photos & Videos):**
-  Added direct "Take Private Photo" and "Record Private Video" actions inside the Secure Vault FAB menu. Media is captured into an isolated temporary cache, encrypted straight to AES-256 `.enc` vault storage, and the temp cache is wiped immediately. Captured media **never** enters `DCIM/Camera` or public gallery folders.
-- **🛡️ Comprehensive Security & Media Restoral:**
-  Full backward-compatible support for restoring media back to the device gallery whenever desired, retaining universal master recovery passphrase (`DASMO SUBHOJIT`) and persistent cross-install storage.
+- **🔒 Canonical MediaStore Resolution & Guaranteed Gallery Purge:**
+  Completely overhauled the media cleanup engine to resolve arbitrary picker and document URIs into canonical MediaStore entries (`content://media/external/images/media/<id>`) and real filesystem paths. Original media imported from the Gallery is deleted immediately via direct filesystem shredding and ContentResolver, followed by a forced `MediaScannerConnection` purge to evict cached thumbnails from the device gallery.
+- **⚡ All Files Access ("Auto-Clean") Support:**
+  Added optional one-time permission flow to grant All Files Access (`MANAGE_EXTERNAL_STORAGE`). When granted, DASMO deletes original media from storage and gallery silently and instantly without requiring repeated system popups.
+- **🛡️ Android 11+ (API 30+) Native Scoped Storage Deletion Fallback:**
+  When All Files Access is not granted, canonical MediaStore URIs are passed cleanly to `MediaStore.createDeleteRequest`, displaying Android's native confirmation dialog ("Allow DASMO to delete this photo?") without crashing or failing.
+- **📷 In-Vault Direct Private Camera:**
+  Snaps private photos and videos directly into AES-256 encrypted storage via isolated app cache without ever entering `DCIM/Camera` or the public gallery.
 
 ---
 
@@ -44,16 +46,16 @@
 
 | File | Type | Target Architecture | Size | Checksum (SHA-256) |
 | :--- | :--- | :--- | :--- | :--- |
-| [`dasmo-lock-v1.0.5.apk`](https://github.com/SUBHOJITPAUL797/DASMO-APP-LOCK/releases/download/v1.0.5/dasmo-lock-v1.0.5.apk) | Production APK | Universal (arm64-v8a, armeabi-v7a, x86_64) | 19.6 MB | `8543D5FCBC5212D125C79BD7150A1C9E7B2E6F8E3DA7ECA7118A6BD1424C169C` |
+| [`dasmo-lock-v1.0.6.apk`](https://github.com/SUBHOJITPAUL797/DASMO-APP-LOCK/releases/download/v1.0.6/dasmo-lock-v1.0.6.apk) | Production APK | Universal (arm64-v8a, armeabi-v7a, x86_64) | 19.6 MB | `83ADE4B2463383DB84418BE1535989D3211F200AC72FF586F1C9E461F2CF1570` |
 ```
 
 ---
 
-## 🚀 Current Production Release: v1.0.5
+## 🚀 Current Production Release: v1.0.6
 
 ### Version Summary
-- **Tag:** `v1.0.5`
-- **Version Code:** `6`
-- **Version Name:** `1.0.5`
+- **Tag:** `v1.0.6`
+- **Version Code:** `7`
+- **Version Name:** `1.0.6`
 - **Status:** General Availability (GA)
 - **Repository:** `SUBHOJITPAUL797/DASMO-APP-LOCK`
