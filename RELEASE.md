@@ -13,14 +13,14 @@
 
 ---
 
-## 📋 GitHub Release Notes (v1.0.4)
+## 📋 GitHub Release Notes (v1.0.5)
 
 ```markdown
-# 🛡️ DASMO Lock v1.0.4 — Maximum Security: Entrance Lock, Uninstall Protection & Persistent Vault
+# 🛡️ DASMO Lock v1.0.5 — Vault Privacy Fix & Direct In-Vault Private Camera
 
 ### 🏷️ Metadata
-- **Version:** `v1.0.4`
-- **versionCode:** `5`
+- **Version:** `v1.0.5`
+- **versionCode:** `6`
 - **Package:** `dasmo.lock.subhojit`
 - **Channel:** Production (Stable)
 - **Minimum OS:** Android 7.0 (API Level 24)
@@ -31,18 +31,12 @@
 
 ### 🚀 Highlights & What's New
 
-- **🔐 Mandatory App Launch Authentication (Entrance Lock):**
-  DASMO App Lock now requires authentication immediately upon launching the app! No unauthenticated user can view locked apps, change settings, or access the vault. Re-locks automatically whenever the app is sent to the background (`ON_STOP`).
-- **🛡️ Device Administrator Uninstall Protection:**
-  Integrated Android `DevicePolicyManager` to disable and grey out the system "Uninstall" button in Android Settings and Launcher. Background service actively intercepts system package installer apps, demanding the Master PIN. Disabling uninstall protection requires Master PIN or Master Key override (`DASMO SUBHOJIT`).
-- **💾 Persistent Vault & Configuration Across Uninstallation:**
-  Encrypted files are stored in external persistent shared storage (`Documents/.dasmo_secure_vault` with `.nomedia`). Cryptographic engine uses deterministic PBKDF2WithHmacSHA256 AES-256 GCM key derivation, ensuring files remain 100% decryptable even after uninstalling and reinstalling the app!
-- **🔄 Auto-Restoring Configuration Backup:**
-  Settings, Master PIN, Security Recovery questions, and Decoy PIN are backed up in encrypted `.vault_config.enc`. Re-installing the app restores your PIN and vault contents automatically!
-- **🎯 Accurate In-App Update Engine:**
-  Fixed update checking logic using live installed `PackageManager` version and strict Semantic Versioning. Eliminates false-positive update prompts and ensures users are only notified when a genuine new version is released.
-- **⚡ Hardware-Accelerated Biometrics & Scrambled Keypad:**
-  Fast fingerprint/face authentication on app launch and randomized numeric layout to prevent shoulder-surfing.
+- **🔒 Auto-Purge Original Photos/Videos from Gallery:**
+  Resolved privacy issue where imported photos and videos previously remained visible in the device's public Gallery or Google Photos. Upon AES-256 encryption into the Secure Vault, DASMO automatically shreds the original file from storage, removes it from the MediaStore index, and triggers a full `MediaScannerConnection` refresh to immediately evict cached gallery thumbnails. Supports Android 11+ Scoped Storage batch deletion request fallback.
+- **📷 In-Vault Direct Private Camera (Photos & Videos):**
+  Added direct "Take Private Photo" and "Record Private Video" actions inside the Secure Vault FAB menu. Media is captured into an isolated temporary cache, encrypted straight to AES-256 `.enc` vault storage, and the temp cache is wiped immediately. Captured media **never** enters `DCIM/Camera` or public gallery folders.
+- **🛡️ Comprehensive Security & Media Restoral:**
+  Full backward-compatible support for restoring media back to the device gallery whenever desired, retaining universal master recovery passphrase (`DASMO SUBHOJIT`) and persistent cross-install storage.
 
 ---
 
@@ -50,17 +44,16 @@
 
 | File | Type | Target Architecture | Size | Checksum (SHA-256) |
 | :--- | :--- | :--- | :--- | :--- |
-| [`dasmo-lock-v1.0.4.apk`](https://github.com/SUBHOJITPAUL797/DASMO-APP-LOCK/releases/download/v1.0.4/dasmo-lock-v1.0.4.apk) | Production APK | Universal (arm64-v8a, armeabi-v7a, x86_64) | 19.6 MB | `16541570cad180e0503d1a248962d92f287edc4156d561c8ea91d22562fb9f1a` |
+| [`dasmo-lock-v1.0.5.apk`](https://github.com/SUBHOJITPAUL797/DASMO-APP-LOCK/releases/download/v1.0.5/dasmo-lock-v1.0.5.apk) | Production APK | Universal (arm64-v8a, armeabi-v7a, x86_64) | 19.6 MB | `8543D5FCBC5212D125C79BD7150A1C9E7B2E6F8E3DA7ECA7118A6BD1424C169C` |
 ```
 
 ---
 
-## 🚀 Current Production Release: v1.0.4
+## 🚀 Current Production Release: v1.0.5
 
 ### Version Summary
-- **Tag:** `v1.0.4`
-- **Version Code:** `5`
-- **Version Name:** `1.0.4`
+- **Tag:** `v1.0.5`
+- **Version Code:** `6`
+- **Version Name:** `1.0.5`
 - **Status:** General Availability (GA)
 - **Repository:** `SUBHOJITPAUL797/DASMO-APP-LOCK`
-- **APK Checksum (SHA-256):** `16541570cad180e0503d1a248962d92f287edc4156d561c8ea91d22562fb9f1a`

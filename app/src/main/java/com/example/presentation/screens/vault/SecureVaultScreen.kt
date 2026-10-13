@@ -1,11 +1,17 @@
 package com.example.presentation.screens.vault
 
+import android.Manifest
+import android.app.Activity
 import android.content.Context
+import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
+import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.*
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -51,9 +57,12 @@ import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.ByteArrayDataSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.ui.PlayerView
+import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import com.example.util.CryptoManager
 import com.example.util.MasterKeyManager
 import com.example.util.SecurePreferences
+import com.example.util.VaultMediaCleaner
 import com.example.util.VaultRestoreManager
 import com.example.util.VaultStorageManager
 import kotlinx.coroutines.Dispatchers
@@ -532,6 +541,12 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
     var isMediaLoading by remember { mutableStateOf(false) }
     var showFullScreenViewer by remember { mutableStateOf(false) }
 
+    // Media action dialogs & Camera capture states
+    var showPhotoActionDialog by remember { mutableStateOf(false) }
+    var showVideoActionDialog by remember { mutableStateOf(false) }
+    var tempCameraFile by remember { mutableStateOf<File?>(null) }
+    var pendingCameraAction by remember { mutableStateOf<String?>(null) }
+
     val dateFormatter = remember { SimpleDateFormat("MMM dd, yyyy HH:mm", Locale.getDefault()) }
     val correctPin = remember(hasMasterPin) { securePrefs.getString("app_pin", "") }
     val decoyPin = remember { securePrefs.getString("decoy_pin", "") }
@@ -566,7 +581,157 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
             ?: emptyList()
     }
 
-    // ── Photo importer with real byte-level progress ───────────────────────────
+    // ── System Scoped Storage Delete confirmation launcher ────────────────────
+    val deleteRequestLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            Toast.makeText(context, "Original media deleted from Gallery", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // ── Direct Camera Photo Launcher (never enters public Gallery) ─────────────
+    val cameraPhotoLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicture()
+    ) { success ->
+        val file = tempCameraFile
+        if (success && file != null && file.exists() && file.length() > 0) {
+            coroutineScope.launch(Dispatchers.IO) {
+                val totalBytes = file.length()
+                val dir = getVaultDir()
+                val fileName = "IMG_PRIVATE_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())}.jpg.enc"
+
+                withContext(Dispatchers.Main) {
+                    isProgressVisible = true
+                    progressTitle = "Encrypting Private Photo"
+                    progressStepText = "Saving to AES-256 Vault..."
+                    progressFileText = fileName.removeSuffix(".enc")
+                    progressFraction = 0.5f
+                    progressBytesProcessed = 0L
+                    progressTotalBytes = totalBytes
+                }
+                try {
+                    val encryptedBytes = CryptoManager.encryptBytes(file.readBytes())
+                    File(dir, fileName).writeBytes(encryptedBytes)
+                    // Immediately wipe unencrypted cache file
+                    file.delete()
+                    withContext(Dispatchers.Main) {
+                        isProgressVisible = false
+                        loadSecureFiles()
+                        Toast.makeText(context, "Private photo captured and securely encrypted in vault!", Toast.LENGTH_SHORT).show()
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    withContext(Dispatchers.Main) {
+                        isProgressVisible = false
+                        Toast.makeText(context, "Failed to secure photo: ${e.message}", Toast.LENGTH_SHORT).show()
+                    }
+                } finally {
+                    tempCameraFile?.delete()
+                    tempCameraFile = null
+                }
+            }
+        } else {
+            tempCameraFile?.delete()
+            tempCameraFile = null
+        }
+    }
+
+    // ── Direct Camera Video Launcher (never enters public Gallery) ─────────────
+    val cameraVideoLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CaptureVideo()
+    ) { success ->
+        val file = tempCameraFile
+        if (success && file != null && file.exists() && file.length() > 0) {
+            coroutineScope.launch(Dispatchers.IO) {
+                val totalBytes = file.length()
+                val dir = getVaultDir()
+                val fileName = "VID_PRIVATE_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())}.mp4.enc"
+
+                withContext(Dispatchers.Main) {
+                    isProgressVisible = true
+                    progressTitle = "Encrypting Private Video"
+                    progressStepText = "Saving to AES-256 Vault..."
+                    progressFileText = fileName.removeSuffix(".enc")
+                    progressFraction = 0.5f
+                    progressBytesProcessed = 0L
+                    progressTotalBytes = totalBytes
+                }
+                try {
+                    val encryptedBytes = CryptoManager.encryptBytes(file.readBytes())
+                    File(dir, fileName).writeBytes(encryptedBytes)
+                    // Immediately wipe unencrypted cache file
+                    file.delete()
+                    withContext(Dispatchers.Main) {
+                        isProgressVisible = false
+                        loadSecureFiles()
+                        Toast.makeText(context, "Private video recorded and securely encrypted in vault!", Toast.LENGTH_SHORT).show()
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    withContext(Dispatchers.Main) {
+                        isProgressVisible = false
+                        Toast.makeText(context, "Failed to secure video: ${e.message}", Toast.LENGTH_SHORT).show()
+                    }
+                } finally {
+                    tempCameraFile?.delete()
+                    tempCameraFile = null
+                }
+            }
+        } else {
+            tempCameraFile?.delete()
+            tempCameraFile = null
+        }
+    }
+
+    fun startCameraPhoto() {
+        try {
+            val file = File(context.cacheDir, "temp_private_capture_${System.currentTimeMillis()}.jpg")
+            if (file.exists()) file.delete()
+            file.createNewFile()
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+            tempCameraFile = file
+            cameraPhotoLauncher.launch(uri)
+        } catch (e: Exception) {
+            Toast.makeText(context, "Cannot open camera: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    fun startCameraVideo() {
+        try {
+            val file = File(context.cacheDir, "temp_private_capture_${System.currentTimeMillis()}.mp4")
+            if (file.exists()) file.delete()
+            file.createNewFile()
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+            tempCameraFile = file
+            cameraVideoLauncher.launch(uri)
+        } catch (e: Exception) {
+            Toast.makeText(context, "Cannot open video camera: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            if (pendingCameraAction == "video") startCameraVideo() else startCameraPhoto()
+        } else {
+            Toast.makeText(context, "Camera permission is required to capture private media", Toast.LENGTH_SHORT).show()
+        }
+        pendingCameraAction = null
+    }
+
+    fun launchCameraWithPermissionCheck(action: String) {
+        pendingCameraAction = action
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+            if (action == "video") startCameraVideo() else startCameraPhoto()
+            pendingCameraAction = null
+        } else {
+            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    // ── Photo importer with real byte-level progress & auto-deletion ──────────
     val photosPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetMultipleContents()
     ) { uris ->
@@ -590,6 +755,8 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
                 progressBytesProcessed = 0L
                 progressTotalBytes = grandTotal
             }
+
+            val unDeletedUris = mutableListOf<Uri>()
 
             uris.forEachIndexed { index, uri ->
                 try {
@@ -628,6 +795,12 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
                         }
                         File(dir, fileName).writeBytes(encryptedBytes)
                         grandProcessed += fileSize
+
+                        // Automatically delete original unencrypted photo from device & gallery
+                        val isDeleted = VaultMediaCleaner.deleteOriginalMedia(context, uri)
+                        if (!isDeleted) {
+                            unDeletedUris.add(uri)
+                        }
                     }
                 } catch (e: Exception) {
                     e.printStackTrace()
@@ -637,12 +810,21 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
             withContext(Dispatchers.Main) {
                 isProgressVisible = false
                 loadSecureFiles()
-                Toast.makeText(context, "$total photos securely encrypted in vault", Toast.LENGTH_SHORT).show()
+                if (unDeletedUris.isNotEmpty()) {
+                    val intentSender = VaultMediaCleaner.createSystemDeleteIntentSender(context, unDeletedUris)
+                    if (intentSender != null) {
+                        deleteRequestLauncher.launch(IntentSenderRequest.Builder(intentSender).build())
+                    } else {
+                        Toast.makeText(context, "$total photos securely encrypted in vault", Toast.LENGTH_SHORT).show()
+                    }
+                } else {
+                    Toast.makeText(context, "$total photos encrypted and removed from gallery", Toast.LENGTH_SHORT).show()
+                }
             }
         }
     }
 
-    // ── Video importer with real byte-level progress ───────────────────────────
+    // ── Video importer with real byte-level progress & auto-deletion ──────────
     val videosPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetMultipleContents()
     ) { uris ->
@@ -665,6 +847,8 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
                 progressBytesProcessed = 0L
                 progressTotalBytes = grandTotal
             }
+
+            val unDeletedUris = mutableListOf<Uri>()
 
             uris.forEachIndexed { index, uri ->
                 try {
@@ -703,6 +887,12 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
                         }
                         File(dir, fileName).writeBytes(encryptedBytes)
                         grandProcessed += fileSize
+
+                        // Automatically delete original unencrypted video from device & gallery
+                        val isDeleted = VaultMediaCleaner.deleteOriginalMedia(context, uri)
+                        if (!isDeleted) {
+                            unDeletedUris.add(uri)
+                        }
                     }
                 } catch (e: Exception) {
                     e.printStackTrace()
@@ -712,7 +902,16 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
             withContext(Dispatchers.Main) {
                 isProgressVisible = false
                 loadSecureFiles()
-                Toast.makeText(context, "$total videos securely encrypted in vault", Toast.LENGTH_SHORT).show()
+                if (unDeletedUris.isNotEmpty()) {
+                    val intentSender = VaultMediaCleaner.createSystemDeleteIntentSender(context, unDeletedUris)
+                    if (intentSender != null) {
+                        deleteRequestLauncher.launch(IntentSenderRequest.Builder(intentSender).build())
+                    } else {
+                        Toast.makeText(context, "$total videos securely encrypted in vault", Toast.LENGTH_SHORT).show()
+                    }
+                } else {
+                    Toast.makeText(context, "$total videos encrypted and removed from gallery", Toast.LENGTH_SHORT).show()
+                }
             }
         }
     }
@@ -1084,8 +1283,8 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
                     onClick = {
                         when (activeTab) {
                             0 -> { newFileName = ""; newFileContent = ""; saveError = null; showCreateDialog = true }
-                            1 -> photosPickerLauncher.launch("image/*")
-                            else -> videosPickerLauncher.launch("video/*")
+                            1 -> showPhotoActionDialog = true
+                            else -> showVideoActionDialog = true
                         }
                     },
                     containerColor = MaterialTheme.colorScheme.primaryContainer,
@@ -1477,6 +1676,212 @@ fun SecureVaultScreen(context: Context, onBack: () -> Unit) {
                 }
             }
         }
+    }
+
+    // ── Photo Source Action Dialog (Camera vs Gallery) ────────────────────────
+    if (showPhotoActionDialog) {
+        AlertDialog(
+            onDismissRequest = { showPhotoActionDialog = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Image, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.width(10.dp))
+                    Text("Add Secure Photo", fontWeight = FontWeight.Bold)
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        "Choose how you want to add private photos to your encrypted vault:",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    // Option 1: Take Photo with Camera
+                    Surface(
+                        onClick = {
+                            showPhotoActionDialog = false
+                            launchCameraWithPermissionCheck("photo")
+                        },
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Default.CameraAlt,
+                                contentDescription = "Camera",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(30.dp)
+                            )
+                            Spacer(Modifier.width(14.dp))
+                            Column {
+                                Text(
+                                    "Take Private Photo",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    "Snaps directly into vault. Never touches gallery.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+
+                    // Option 2: Import from Gallery
+                    Surface(
+                        onClick = {
+                            showPhotoActionDialog = false
+                            photosPickerLauncher.launch("image/*")
+                        },
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Default.PhotoLibrary,
+                                contentDescription = "Gallery",
+                                tint = MaterialTheme.colorScheme.secondary,
+                                modifier = Modifier.size(30.dp)
+                            )
+                            Spacer(Modifier.width(14.dp))
+                            Column {
+                                Text(
+                                    "Import from Gallery",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    "Encrypts and automatically removes original from gallery.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showPhotoActionDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    // ── Video Source Action Dialog (Camera vs Gallery) ────────────────────────
+    if (showVideoActionDialog) {
+        AlertDialog(
+            onDismissRequest = { showVideoActionDialog = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Movie, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.width(10.dp))
+                    Text("Add Secure Video", fontWeight = FontWeight.Bold)
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        "Choose how you want to add private videos to your encrypted vault:",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    // Option 1: Record Video with Camera
+                    Surface(
+                        onClick = {
+                            showVideoActionDialog = false
+                            launchCameraWithPermissionCheck("video")
+                        },
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Default.Videocam,
+                                contentDescription = "Video Camera",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(30.dp)
+                            )
+                            Spacer(Modifier.width(14.dp))
+                            Column {
+                                Text(
+                                    "Record Private Video",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    "Records directly into vault. Never touches gallery.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+
+                    // Option 2: Import from Gallery
+                    Surface(
+                        onClick = {
+                            showVideoActionDialog = false
+                            videosPickerLauncher.launch("video/*")
+                        },
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Default.VideoLibrary,
+                                contentDescription = "Gallery",
+                                tint = MaterialTheme.colorScheme.secondary,
+                                modifier = Modifier.size(30.dp)
+                            )
+                            Spacer(Modifier.width(14.dp))
+                            Column {
+                                Text(
+                                    "Import from Gallery",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    "Encrypts and automatically removes original from gallery.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showVideoActionDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 }
 
