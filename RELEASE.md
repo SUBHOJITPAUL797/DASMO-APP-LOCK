@@ -13,32 +13,35 @@
 
 ---
 
-## 📋 GitHub Release Notes (v1.0.7)
+## 📋 GitHub Release Notes (v1.0.8)
 
 ```markdown
-# 🛡️ DASMO Lock v1.0.7 — Seamless Gallery & File Manager Auto-Purge & UX Overhaul
+# 🛡️ DASMO Lock v1.0.8 — Advanced Architecture, Security Database & UI State Machine Overhaul
 
 ### 🏷️ Metadata
-- **Version:** `v1.0.7`
-- **versionCode:** `8`
+- **Version:** `v1.0.8`
+- **versionCode:** `9`
 - **Package:** `dasmo.lock.subhojit`
 - **Channel:** Production (Stable)
 - **Minimum OS:** Android 7.0 (API Level 24)
 - **Target OS:** Android 15 (API Level 36)
-- **Release Date:** October 2026
+- **Release Date:** November 2026
 
 ---
 
 ### 🚀 Highlights & What's New
 
-- **✨ Seamless Gallery & File Manager Auto-Purge:**
-  Importing media from your gallery or file manager now automatically and smoothly removes the unencrypted originals from device storage (`DCIM/Camera`, `Pictures`, `Download`, etc.) and instantly flushes Android's `MediaScannerConnection` cache so photos disappear immediately from Gallery and Google Photos.
-- **⚡ Intuitive "Auto-Clean" Permission UX:**
-  Fixed premature picker launch race conditions. A one-tap "Enable" banner in the vault guides users cleanly to grant "All Files Access" (`MANAGE_EXTERNAL_STORAGE`). Once enabled, media cleanup happens instantly without repeated OS popups.
-- **🔍 Exhaustive On-Device Disk Search Engine:**
-  Added recursive, fast targeted disk scanning (`findFileOnDevice`) across camera, screenshots, downloads, and social media directories, matching by filename, metadata, and exact byte size.
-- **🛡️ Foolproof MediaStore Deletion & Scoped Storage Fallback:**
-  Automatically requests runtime media permissions (`READ_MEDIA_IMAGES` / `READ_MEDIA_VIDEO`) on Android 13+ to resolve canonical MediaStore URIs reliably. If All Files Access is not enabled, Android's native confirmation dialog (`createDeleteRequest`) triggers cleanly without silent failures.
+- **🗄️ Enhanced Database Architecture & Security Models:**
+  - Integrated Room database structure (`AppGuardDatabase`, `AppLockDao`, `LockedAppEntity`) for persistent app lock rules and state caching.
+  - Added centralized security models (`SecurityModels.kt`) ensuring type safety across app lock, vault, and disguise subsystems.
+- **🔢 Calculator Disguise State Machine:**
+  - Upgraded Calculator Disguise screen with dedicated state machine (`CalculatorStateMachine.kt`) for robust vault access without UI flicker.
+- **🔐 Lock Screen State Machine & Session Tracking:**
+  - Modernized lock activity lifecycle (`LockStateMachine.kt`, `LockSessionTracker.kt`, `AppEntranceLockScreen.kt`) with smoother biometric, pattern, and PIN verification.
+- **🖼️ Vault Media Viewers & Storage Improvements:**
+  - Dedicated full-screen vault media viewer components (`VaultMediaViewers.kt`, `VaultStorage.kt`) supporting high-resolution image zoom and video playback.
+- **⚙️ Dedicated Settings Dashboard:**
+  - Integrated comprehensive settings architecture (`SettingsScreen.kt`, `SettingsState.kt`) with tactile haptic components.
 
 ---
 
@@ -46,16 +49,16 @@
 
 | File | Type | Target Architecture | Size | Checksum (SHA-256) |
 | :--- | :--- | :--- | :--- | :--- |
-| [`dasmo-lock-v1.0.7.apk`](https://github.com/SUBHOJITPAUL797/DASMO-APP-LOCK/releases/download/v1.0.7/dasmo-lock-v1.0.7.apk) | Production APK | Universal (arm64-v8a, armeabi-v7a, x86_64) | 19.7 MB | `808504B4A96F0B2E984F536A2C6403B261AFB3A6C6A1D474B6FD2021D22ADBE0` |
+| [`dasmo-lock-v1.0.8.apk`](https://github.com/SUBHOJITPAUL797/DASMO-APP-LOCK/releases/download/v1.0.8/dasmo-lock-v1.0.8.apk) | Production APK | Universal (arm64-v8a, armeabi-v7a, x86_64) | 20.78 MB | `85bee7fd5d15fbbe48c9e44b4ea3a88f24b22a66de02f076693a2427f9e2b4b8` |
 ```
 
 ---
 
-## 🚀 Current Production Release: v1.0.7
+## 🚀 Current Production Release: v1.0.8
 
 ### Version Summary
-- **Tag:** `v1.0.7`
-- **Version Code:** `8`
-- **Version Name:** `1.0.7`
+- **Tag:** `v1.0.8`
+- **Version Code:** `9`
+- **Version Name:** `1.0.8`
 - **Status:** General Availability (GA)
 - **Repository:** `SUBHOJITPAUL797/DASMO-APP-LOCK`
