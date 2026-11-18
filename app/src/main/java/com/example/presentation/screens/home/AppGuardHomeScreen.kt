@@ -1,19 +1,21 @@
 package com.example.presentation.screens.home
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -28,55 +30,50 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.toBitmap
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.R
+import com.example.data.db.LockedAppEntity
+import com.example.domain.model.SecuritySettings
 import com.example.domain.repository.AppLockRepository
-import com.example.presentation.screens.settings.SettingsDialog
+import com.example.presentation.screens.vault.VaultStorage
+import com.example.service.AppLockService
+import com.example.ui.components.Icon3DBadge
+import com.example.ui.components.Tactile3DCard
+import com.example.ui.theme.*
 import com.example.util.SecurePreferences
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
 
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.foundation.BorderStroke
-
-@Composable
-fun AppIcon(packageName: String, packageManager: PackageManager) {
-    var icon by remember { mutableStateOf<ImageBitmap?>(null) }
-
-    LaunchedEffect(packageName) {
-        withContext(Dispatchers.IO) {
-            try {
-                val drawable = packageManager.getApplicationIcon(packageName)
-                val bitmap = drawable.toBitmap(width = 120, height = 120)
-                icon = bitmap.asImageBitmap()
-            } catch (e: Exception) {
-                // Ignore
-            }
-        }
-    }
-
-    if (icon != null) {
-        Image(
-            bitmap = icon!!,
-            contentDescription = null,
-            modifier = Modifier.size(40.dp)
-        )
-    } else {
-        Box(
-            modifier = Modifier
-                .size(40.dp)
-                .background(MaterialTheme.colorScheme.surfaceVariant, CircleShape)
-        )
-    }
+enum class AppCategory(val chipLabel: String) {
+    ALL("All"),
+    LOCKED("Locked"),
+    SOCIAL("Social & Chat"),
+    FINANCE("Finance & Pay"),
+    SYSTEM("System")
 }
+
+data class InstalledAppEntry(
+    val packageName: String,
+    val label: String,
+    val flags: Int
+)
 
 private fun isSocialApp(pkg: String, label: String): Boolean {
     val lowPkg = pkg.lowercase()
@@ -108,78 +105,150 @@ private fun isSystemApp(pkg: String, label: String, flags: Int): Boolean {
     return isSysFlag || keywords.any { lowPkg.contains(it) || lowLabel.contains(it) }
 }
 
+fun calculateSecurityHealthScore(
+    lockedApps: List<LockedAppEntity>,
+    settings: SecuritySettings
+): Int {
+    var score = 30
+    val hasSettingsLocked = lockedApps.any { it.isLocked && (it.packageName.contains("settings") || it.packageName.contains("vending")) }
+    if (hasSettingsLocked) score += 25
+    val hasSocialLocked = lockedApps.any { it.isLocked && isSocialApp(it.packageName, it.appLabel) }
+    if (hasSocialLocked) score += 15
+    if (settings.scrambleKeypadEnabled) score += 10
+    if (settings.dynamicTimePinEnabled) score += 10
+    if (settings.preventScreenshots) score += 10
+    return score.coerceIn(0, 100)
+}
+
+@Composable
+fun AppIcon(packageName: String, packageManager: PackageManager) {
+    var icon by remember(packageName) { mutableStateOf<ImageBitmap?>(null) }
+
+    LaunchedEffect(packageName) {
+        icon = withContext(Dispatchers.IO) {
+            try {
+                val drawable = packageManager.getApplicationIcon(packageName)
+                drawable.toBitmap(width = 120, height = 120).asImageBitmap()
+            } catch (_: Exception) {
+                null
+            }
+        }
+    }
+
+    if (icon != null) {
+        Image(
+            bitmap = icon!!,
+            contentDescription = null,
+            modifier = Modifier.size(40.dp)
+        )
+    } else {
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .background(MaterialTheme.colorScheme.surfaceVariant, CircleShape)
+        )
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AppGuardHomeScreen(
     repository: AppLockRepository,
     context: Context,
     onNavigateToIntruders: () -> Unit,
-    onNavigateToVault: () -> Unit
+    onNavigateToVault: () -> Unit,
+    onNavigateToSettings: () -> Unit,
+    onLockToDisguise: () -> Unit,
+    onSuppressNextRelock: () -> Unit = {}
 ) {
     val coroutineScope = rememberCoroutineScope()
-    var installedApps by remember { mutableStateOf<List<Triple<String, String, Int>>>(emptyList()) }
+    val haptic = LocalHapticFeedback.current
+    val pm = context.packageManager
+    val securePrefs = remember { SecurePreferences.getInstance(context) }
+    val settings by securePrefs.settingsFlow.collectAsStateWithLifecycle()
+
+    var installedApps by remember { mutableStateOf<List<InstalledAppEntry>>(emptyList()) }
     val lockedApps by repository.allLockedApps.collectAsStateWithLifecycle(initialValue = emptyList())
     var isUsageStatsEnabled by remember { mutableStateOf(false) }
     var isOverlayEnabled by remember { mutableStateOf(false) }
 
-    var showSystemApps by remember { mutableStateOf(true) }
-    var showPinDialog by remember { mutableStateOf(false) }
+    var showSystemInAll by remember { mutableStateOf(true) }
     var searchQuery by remember { mutableStateOf("") }
-    var selectedCategory by remember { mutableStateOf("All") } // "All", "Locked", "Social", "Finance", "System"
+    var selectedCategory by remember { mutableStateOf(AppCategory.ALL) }
 
-    val pm = context.packageManager
-    val securePrefs = remember { SecurePreferences(context) }
-    var hiddenApps by remember { mutableStateOf<Set<String>>(emptySet()) }
     var intruderCount by remember { mutableStateOf(0) }
     var vaultCount by remember { mutableStateOf(0) }
 
-    fun loadCounts() {
-        val hiddenAppsStr = securePrefs.getString("hidden_apps", "") ?: ""
-        hiddenApps = hiddenAppsStr.split(",").filter { it.isNotEmpty() }.toSet()
-        val intDir = context.getDir("intruders", Context.MODE_PRIVATE)
-        intruderCount = intDir.listFiles()?.size ?: 0
-        val vaultDir = context.getDir("secure_vault", Context.MODE_PRIVATE)
-        vaultCount = vaultDir.listFiles()?.filter { it.name.endsWith(".enc") }?.size ?: 0
-    }
-
-    LaunchedEffect(Unit) {
-        withContext(Dispatchers.IO) {
-            loadCounts()
+    fun refreshCounts() {
+        coroutineScope.launch {
+            val (iCount, vCount) = withContext(Dispatchers.IO) {
+                val intDir = context.getDir("intruders", Context.MODE_PRIVATE)
+                val intruders = intDir.listFiles()?.count { it.isFile } ?: 0
+                val vault = VaultStorage.countRealVaultItems(context)
+                intruders to vault
+            }
+            intruderCount = iCount
+            vaultCount = vCount
         }
     }
 
-    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
         onResult = { _ -> }
     )
 
-    LaunchedEffect(showSystemApps) {
-        withContext(Dispatchers.IO) {
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+        onResult = { _ ->
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+            ) {
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+    )
+
+    LaunchedEffect(Unit) {
+        refreshCounts()
+        installedApps = withContext(Dispatchers.IO) {
             val packages = pm.getInstalledApplications(PackageManager.GET_META_DATA)
-            val appList = packages.mapNotNull { 
+            packages.mapNotNull {
                 if (it.packageName == context.packageName) return@mapNotNull null
-                if (!showSystemApps && (it.flags and ApplicationInfo.FLAG_SYSTEM) != 0) return@mapNotNull null
-                if (pm.getLaunchIntentForPackage(it.packageName) == null && !it.packageName.contains("settings") && !it.packageName.contains("vending")) return@mapNotNull null
-                
-                Triple(it.packageName, it.loadLabel(pm).toString(), it.flags)
-            }.sortedBy { it.second }
-            installedApps = appList
+                if (pm.getLaunchIntentForPackage(it.packageName) == null &&
+                    !it.packageName.contains("settings") &&
+                    !it.packageName.contains("vending")
+                ) return@mapNotNull null
+
+                InstalledAppEntry(
+                    packageName = it.packageName,
+                    label = it.loadLabel(pm).toString(),
+                    flags = it.flags
+                )
+            }.sortedBy { it.label.lowercase() }
+        }
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
 
-    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
-        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
-            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
-                loadCounts()
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                refreshCounts()
                 val appOps = context.getSystemService(Context.APP_OPS_SERVICE) as android.app.AppOpsManager
-                val mode = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     appOps.unsafeCheckOpNoThrow(
                         android.app.AppOpsManager.OPSTR_GET_USAGE_STATS,
                         android.os.Process.myUid(),
                         context.packageName
                     )
                 } else {
+                    @Suppress("DEPRECATION")
                     appOps.checkOpNoThrow(
                         android.app.AppOpsManager.OPSTR_GET_USAGE_STATS,
                         android.os.Process.myUid(),
@@ -188,10 +257,10 @@ fun AppGuardHomeScreen(
                 }
                 isUsageStatsEnabled = mode == android.app.AppOpsManager.MODE_ALLOWED
                 isOverlayEnabled = Settings.canDrawOverlays(context)
-                
+
                 if (isUsageStatsEnabled && isOverlayEnabled) {
-                    val intent = Intent(context, com.example.service.AppLockService::class.java)
-                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                    val intent = Intent(context, AppLockService::class.java)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                         context.startForegroundService(intent)
                     } else {
                         context.startService(intent)
@@ -205,66 +274,75 @@ fun AppGuardHomeScreen(
         }
     }
 
-    LaunchedEffect(Unit) {
-        if (ContextCompat.checkSelfPermission(context, android.Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
-            cameraPermissionLauncher.launch(android.Manifest.permission.CAMERA)
-        }
+    val lockedPackageSet = remember(lockedApps) {
+        lockedApps.filter { it.isLocked }.map { it.packageName }.toSet()
     }
 
-    if (showPinDialog) {
-        SettingsDialog(
-            onDismiss = {
-                showPinDialog = false
-                loadCounts()
-            },
-            context = context
-        )
-    }
-
-    // Filter apps
-    val filteredApps = remember(installedApps, lockedApps, searchQuery, selectedCategory) {
-        installedApps.filter { (pkg, label, flags) ->
-            val matchesSearch = searchQuery.isBlank() || 
-                label.contains(searchQuery, ignoreCase = true) || 
-                pkg.contains(searchQuery, ignoreCase = true)
+    val filteredApps = remember(installedApps, lockedPackageSet, searchQuery, selectedCategory, showSystemInAll) {
+        installedApps.filter { app ->
+            val matchesSearch = searchQuery.isBlank() ||
+                app.label.contains(searchQuery, ignoreCase = true) ||
+                app.packageName.contains(searchQuery, ignoreCase = true)
 
             val matchesCategory = when (selectedCategory) {
-                "Locked" -> lockedApps.any { it.packageName == pkg && it.isLocked }
-                "Social" -> isSocialApp(pkg, label)
-                "Finance" -> isFinanceApp(pkg, label)
-                "System" -> isSystemApp(pkg, label, flags)
-                else -> true
+                AppCategory.ALL -> showSystemInAll || !isSystemApp(app.packageName, app.label, app.flags)
+                AppCategory.LOCKED -> lockedPackageSet.contains(app.packageName)
+                AppCategory.SOCIAL -> isSocialApp(app.packageName, app.label)
+                AppCategory.FINANCE -> isFinanceApp(app.packageName, app.label)
+                AppCategory.SYSTEM -> isSystemApp(app.packageName, app.label, app.flags)
             }
 
             matchesSearch && matchesCategory
         }
     }
 
-    // Calculate Privacy Health Score
-    val healthScore = remember(lockedApps, securePrefs) {
-        var score = 30 // Base baseline
-        val hasSettingsLocked = lockedApps.any { it.isLocked && (it.packageName.contains("settings") || it.packageName.contains("vending")) }
-        if (hasSettingsLocked) score += 25
-        val hasSocialLocked = lockedApps.any { it.isLocked && isSocialApp(it.packageName, it.appLabel) }
-        if (hasSocialLocked) score += 15
-        if (securePrefs.getString("scramble_keypad", "false") == "true") score += 10
-        if (securePrefs.getString("dynamic_time_pin", "false") == "true") score += 10
-        if (securePrefs.getString("prevent_screenshots", "true") == "true") score += 10
-        score.coerceIn(0, 100)
+    val healthScore = remember(lockedApps, settings) {
+        calculateSecurityHealthScore(lockedApps, settings)
     }
+    val animatedHealthProgress by animateFloatAsState(
+        targetValue = healthScore / 100f,
+        animationSpec = spring(stiffness = Spring.StiffnessLow),
+        label = "health_progress"
+    )
 
     Scaffold(
         topBar = {
             TopAppBar(
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = ObsidianBlack,
+                    titleContentColor = PureWhite
+                ),
                 title = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.Security, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                        Spacer(modifier = Modifier.width(8.dp))
+                        Icon3DBadge(
+                            icon = Icons.Default.Security,
+                            contentDescription = null,
+                            size = 34.dp
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
                         Text("DASMO LOCK", fontWeight = FontWeight.Bold)
                     }
                 },
                 actions = {
-                    IconButton(onClick = onNavigateToVault) {
+                    IconButton(
+                        onClick = {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            onLockToDisguise()
+                        },
+                        modifier = Modifier.testTag("home_engage_disguise_btn")
+                    ) {
+                        Icon(
+                            imageVector = if (settings.calculatorDisguiseEnabled) Icons.Default.Calculate else Icons.Default.ScreenLockPortrait,
+                            contentDescription = if (settings.calculatorDisguiseEnabled) "Engage Disguise Lock" else "Lock App Now"
+                        )
+                    }
+                    IconButton(
+                        onClick = {
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            onNavigateToVault()
+                        },
+                        modifier = Modifier.testTag("home_vault_btn")
+                    ) {
                         BadgedBox(badge = {
                             if (vaultCount > 0) {
                                 Badge { Text(vaultCount.toString()) }
@@ -273,7 +351,13 @@ fun AppGuardHomeScreen(
                             Icon(Icons.Default.Lock, contentDescription = "Vault")
                         }
                     }
-                    IconButton(onClick = onNavigateToIntruders) {
+                    IconButton(
+                        onClick = {
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            onNavigateToIntruders()
+                        },
+                        modifier = Modifier.testTag("home_intruders_btn")
+                    ) {
                         BadgedBox(badge = {
                             if (intruderCount > 0) {
                                 Badge(containerColor = MaterialTheme.colorScheme.error) { Text(intruderCount.toString()) }
@@ -282,7 +366,13 @@ fun AppGuardHomeScreen(
                             Icon(Icons.Default.Person, contentDescription = "Intruders")
                         }
                     }
-                    IconButton(onClick = { showPinDialog = true }) {
+                    IconButton(
+                        onClick = {
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            onNavigateToSettings()
+                        },
+                        modifier = Modifier.testTag("home_settings_btn")
+                    ) {
                         Icon(Icons.Default.Settings, contentDescription = "Settings")
                     }
                 }
@@ -294,7 +384,6 @@ fun AppGuardHomeScreen(
                 .padding(paddingValues)
                 .fillMaxSize()
         ) {
-            // Permission Warnings
             if (!isUsageStatsEnabled) {
                 Card(
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
@@ -309,10 +398,24 @@ fun AppGuardHomeScreen(
                             Text("Usage Access Required", color = MaterialTheme.colorScheme.onErrorContainer, fontWeight = FontWeight.Bold)
                         }
                         Spacer(modifier = Modifier.height(6.dp))
-                        Text("DASMO LOCK needs Usage Access to detect foreground apps.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onErrorContainer)
+                        Text(
+                            "DASMO LOCK needs Usage Access to detect foreground apps.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
                         Spacer(modifier = Modifier.height(8.dp))
                         Button(onClick = {
-                            context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
+                            onSuppressNextRelock()
+                            try {
+                                context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
+                            } catch (_: Exception) {
+                                context.startActivity(
+                                    Intent(
+                                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                        Uri.parse("package:${context.packageName}")
+                                    )
+                                )
+                            }
                         }) {
                             Text("Grant Usage Access")
                         }
@@ -334,14 +437,29 @@ fun AppGuardHomeScreen(
                             Text("Overlay Permission Required", color = MaterialTheme.colorScheme.onErrorContainer, fontWeight = FontWeight.Bold)
                         }
                         Spacer(modifier = Modifier.height(6.dp))
-                        Text("Required to display the secure lockscreen over protected apps.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onErrorContainer)
+                        Text(
+                            "Required to display the secure lockscreen over protected apps.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
                         Spacer(modifier = Modifier.height(8.dp))
                         Button(onClick = {
-                            val intent = Intent(
-                                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                                Uri.parse("package:${context.packageName}")
-                            )
-                            context.startActivity(intent)
+                            onSuppressNextRelock()
+                            try {
+                                context.startActivity(
+                                    Intent(
+                                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                        Uri.parse("package:${context.packageName}")
+                                    )
+                                )
+                            } catch (_: Exception) {
+                                context.startActivity(
+                                    Intent(
+                                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                        Uri.parse("package:${context.packageName}")
+                                    )
+                                )
+                            }
                         }) {
                             Text("Grant Overlay Permission")
                         }
@@ -349,11 +467,9 @@ fun AppGuardHomeScreen(
                 }
             }
 
-            // Privacy Health Score Card
-            Card(
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF161028)),
-                border = BorderStroke(1.dp, Color(0xFF4C2A85)),
-                shape = RoundedCornerShape(18.dp),
+            Tactile3DCard(
+                highlighted = healthScore >= 80,
+                shape = RoundedCornerShape(22.dp),
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp, vertical = 6.dp)
@@ -363,7 +479,7 @@ fun AppGuardHomeScreen(
                         .fillMaxWidth()
                         .background(
                             Brush.horizontalGradient(
-                                listOf(Color(0xFF24123E), Color(0xFF130E20))
+                                listOf(Color(0xFF281448), Color(0xFF130E20))
                             )
                         )
                         .padding(16.dp)
@@ -374,60 +490,77 @@ fun AppGuardHomeScreen(
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Column {
-                                Text(
-                                    "Security Health",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color.White
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Image(
+                                    painter = painterResource(id = R.drawable.img_shield_3d),
+                                    contentDescription = "DASMO Shield",
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier
+                                        .size(50.dp)
+                                        .clip(RoundedCornerShape(14.dp))
                                 )
-                                val statusText = when {
-                                    healthScore >= 80 -> "Shield Active • Highly Protected"
-                                    healthScore >= 50 -> "Moderate • Recommended Actions"
-                                    else -> "Vulnerable • Protect Settings & Apps"
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Column {
+                                    Text(
+                                        "Security Health",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = PureWhite
+                                    )
+                                    val statusText = when {
+                                        healthScore >= 80 -> "Shield Active • Highly Protected"
+                                        healthScore >= 50 -> "Moderate • Recommended Actions"
+                                        else -> "Vulnerable • Protect Settings & Apps"
+                                    }
+                                    val statusColor = when {
+                                        healthScore >= 80 -> NeonViolet
+                                        healthScore >= 50 -> Color(0xFFFBBF24)
+                                        else -> CrimsonAlert
+                                    }
+                                    Text(statusText, style = MaterialTheme.typography.labelSmall, color = statusColor)
                                 }
-                                val statusColor = when {
-                                    healthScore >= 80 -> Color(0xFFC084FC)
-                                    healthScore >= 50 -> Color(0xFFFBBF24)
-                                    else -> Color(0xFFF43F5E)
-                                }
-                                Text(statusText, style = MaterialTheme.typography.labelSmall, color = statusColor)
                             }
                             Surface(
                                 shape = CircleShape,
                                 color = when {
-                                    healthScore >= 80 -> Color(0xFF3B185F)
+                                    healthScore >= 80 -> ContainerPurple
                                     healthScore >= 50 -> Color(0xFF452205)
                                     else -> Color(0xFF4C0519)
                                 },
-                                border = BorderStroke(1.dp, when {
-                                    healthScore >= 80 -> Color(0xFFA855F7)
-                                    healthScore >= 50 -> Color(0xFFF59E0B)
-                                    else -> Color(0xFFF43F5E)
-                                })
+                                border = BorderStroke(
+                                    1.dp,
+                                    when {
+                                        healthScore >= 80 -> ElectricPurple
+                                        healthScore >= 50 -> Color(0xFFF59E0B)
+                                        else -> CrimsonAlert
+                                    }
+                                )
                             ) {
                                 Text(
                                     "$healthScore%",
                                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
                                     fontWeight = FontWeight.ExtraBold,
                                     style = MaterialTheme.typography.titleSmall,
-                                    color = Color.White
+                                    color = PureWhite
                                 )
                             }
                         }
 
                         Spacer(modifier = Modifier.height(12.dp))
                         LinearProgressIndicator(
-                            progress = { healthScore / 100f },
+                            progress = { animatedHealthProgress },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(6.dp)
                                 .clip(RoundedCornerShape(3.dp)),
-                            trackColor = Color(0xFF261D3D),
+                            trackColor = ObsidianSurfaceVariant,
                             color = when {
-                                healthScore >= 80 -> Color(0xFFA855F7)
+                                healthScore >= 80 -> ElectricPurple
                                 healthScore >= 50 -> Color(0xFFF59E0B)
-                                else -> Color(0xFFF43F5E)
+                                else -> CrimsonAlert
                             }
                         )
 
@@ -437,81 +570,98 @@ fun AppGuardHomeScreen(
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Text(
-                                "🔒 ${lockedApps.count { it.isLocked }} Apps Locked",
+                                "${lockedPackageSet.size} Apps Locked",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = Color(0xFFC4B8DE)
+                                color = TextSecondary
                             )
                             Text(
-                                "📸 $intruderCount Intruders",
+                                "$intruderCount Intruders",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = Color(0xFFC4B8DE)
+                                color = TextSecondary
                             )
                             Text(
-                                "🗄️ $vaultCount Vault Files",
+                                "$vaultCount Vault Files",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = Color(0xFFC4B8DE)
+                                color = TextSecondary
                             )
                         }
                     }
                 }
             }
 
-            // Search Bar
             OutlinedTextField(
                 value = searchQuery,
                 onValueChange = { searchQuery = it },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 6.dp),
-                placeholder = { Text("Search installed apps...", color = Color(0xFF8B7FA8)) },
-                leadingIcon = { Icon(Icons.Default.Search, contentDescription = "Search", tint = Color(0xFFA855F7)) },
+                    .padding(horizontal = 16.dp, vertical = 6.dp)
+                    .testTag("home_search_input"),
+                placeholder = { Text("Search installed apps...", color = TextTertiary) },
+                leadingIcon = { Icon(Icons.Default.Search, contentDescription = "Search", tint = ElectricPurple) },
                 trailingIcon = {
                     if (searchQuery.isNotEmpty()) {
                         IconButton(onClick = { searchQuery = "" }) {
-                            Icon(Icons.Default.Close, contentDescription = "Clear", tint = Color(0xFFC4B8DE))
+                            Icon(Icons.Default.Close, contentDescription = "Clear", tint = TextSecondary)
                         }
                     }
                 },
                 singleLine = true,
                 colors = OutlinedTextFieldDefaults.colors(
-                    focusedContainerColor = Color(0xFF130E20),
-                    unfocusedContainerColor = Color(0xFF130E20),
-                    focusedBorderColor = Color(0xFFA855F7),
-                    unfocusedBorderColor = Color(0xFF2E2048),
-                    cursorColor = Color(0xFFA855F7)
+                    focusedContainerColor = ObsidianSurface,
+                    unfocusedContainerColor = ObsidianSurface,
+                    focusedBorderColor = ElectricPurple,
+                    unfocusedBorderColor = ObsidianBorder,
+                    cursorColor = ElectricPurple
                 ),
                 shape = RoundedCornerShape(20.dp)
             )
 
-            // Category Filter Chips
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .horizontalScroll(rememberScrollState())
                     .padding(horizontal = 16.dp, vertical = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                listOf(
-                    "All" to "All (${installedApps.size})",
-                    "Locked" to "Locked (${lockedApps.count { it.isLocked }})",
-                    "Social" to "Social & Chat",
-                    "Finance" to "Finance & Pay",
-                    "System" to "System"
-                ).forEach { (catId, label) ->
+                AppCategory.entries.forEach { category ->
+                    val label = when (category) {
+                        AppCategory.ALL -> "All (${installedApps.size})"
+                        AppCategory.LOCKED -> "Locked (${lockedPackageSet.size})"
+                        else -> category.chipLabel
+                    }
                     FilterChip(
-                        selected = selectedCategory == catId,
-                        onClick = { selectedCategory = catId },
+                        selected = selectedCategory == category,
+                        onClick = {
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            selectedCategory = category
+                        },
                         label = { Text(label) },
-                        leadingIcon = if (selectedCategory == catId) {
+                        leadingIcon = if (selectedCategory == category) {
                             { Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp)) }
-                        } else null
+                        } else null,
+                        modifier = Modifier.testTag("category_chip_${category.name.lowercase()}")
+                    )
+                }
+
+                if (selectedCategory == AppCategory.ALL) {
+                    FilterChip(
+                        selected = showSystemInAll,
+                        onClick = {
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            showSystemInAll = !showSystemInAll
+                        },
+                        label = { Text(if (showSystemInAll) "System: Shown" else "System: Hidden") },
+                        modifier = Modifier.testTag("toggle_system_apps_chip")
                     )
                 }
             }
 
-            // Batch Action Buttons when specific category is active
-            if (selectedCategory != "All" && selectedCategory != "Locked" && filteredApps.isNotEmpty()) {
-                val allCategoryLocked = filteredApps.all { app -> lockedApps.any { it.packageName == app.first && it.isLocked } }
+            if (selectedCategory != AppCategory.ALL &&
+                selectedCategory != AppCategory.LOCKED &&
+                filteredApps.isNotEmpty()
+            ) {
+                val allCategoryLocked = filteredApps.all { lockedPackageSet.contains(it.packageName) }
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -526,38 +676,40 @@ fun AppGuardHomeScreen(
                     )
                     Button(
                         onClick = {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                             coroutineScope.launch(Dispatchers.IO) {
                                 if (allCategoryLocked) {
-                                    filteredApps.forEach { repository.unlockApp(it.first) }
+                                    filteredApps.forEach { repository.unlockApp(it.packageName) }
                                 } else {
-                                    filteredApps.forEach { repository.lockApp(it.first, it.second) }
+                                    filteredApps.forEach { repository.lockApp(it.packageName, it.label) }
                                 }
                             }
                         },
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                        modifier = Modifier.height(34.dp)
+                        modifier = Modifier
+                            .height(34.dp)
+                            .testTag("category_batch_lock_btn")
                     ) {
-                        Text(if (allCategoryLocked) "Unlock All" else "Lock All ${selectedCategory}")
+                        Text(if (allCategoryLocked) "Unlock All" else "Lock All ${selectedCategory.chipLabel}")
                     }
                 }
             }
 
-            // Apps List
             LazyColumn(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
             ) {
-                items(filteredApps, key = { it.first }) { (pkg, label, _) ->
-                    val isLocked = lockedApps.any { it.packageName == pkg && it.isLocked }
-                    val isHidden = hiddenApps.contains(pkg)
+                items(filteredApps, key = { it.packageName }) { app ->
+                    val isLocked = lockedPackageSet.contains(app.packageName)
+                    val isHidden = settings.hiddenApps.contains(app.packageName)
 
                     ListItem(
-                        leadingContent = { AppIcon(pkg, pm) },
-                        headlineContent = { Text(label, fontWeight = FontWeight.Medium) },
+                        leadingContent = { AppIcon(app.packageName, pm) },
+                        headlineContent = { Text(app.label, fontWeight = FontWeight.Medium) },
                         supportingContent = {
                             Column {
-                                Text(pkg, style = MaterialTheme.typography.bodySmall)
+                                Text(app.packageName, style = MaterialTheme.typography.bodySmall)
                                 if (isHidden) {
                                     Spacer(modifier = Modifier.height(2.dp))
                                     Text(
@@ -576,10 +728,10 @@ fun AppGuardHomeScreen(
                             ) {
                                 IconButton(
                                     onClick = {
-                                        val updated = if (isHidden) hiddenApps - pkg else hiddenApps + pkg
-                                        hiddenApps = updated
-                                        securePrefs.putString("hidden_apps", updated.joinToString(","))
-                                    }
+                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        securePrefs.toggleHiddenApp(app.packageName)
+                                    },
+                                    modifier = Modifier.testTag("hide_app_btn_${app.packageName}")
                                 ) {
                                     Icon(
                                         imageVector = if (isHidden) Icons.Default.VisibilityOff else Icons.Default.Visibility,
@@ -590,19 +742,21 @@ fun AppGuardHomeScreen(
                                 Switch(
                                     checked = isLocked,
                                     onCheckedChange = { checked ->
+                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                                         coroutineScope.launch(Dispatchers.IO) {
                                             if (checked) {
-                                                repository.lockApp(pkg, label)
+                                                repository.lockApp(app.packageName, app.label)
                                             } else {
-                                                repository.unlockApp(pkg)
+                                                repository.unlockApp(app.packageName)
                                             }
                                         }
-                                    }
+                                    },
+                                    modifier = Modifier.testTag("lock_switch_${app.packageName}")
                                 )
                             }
                         }
                     )
-                    HorizontalDivider()
+                    HorizontalDivider(color = ObsidianBorder.copy(alpha = 0.45f))
                 }
             }
         }

@@ -4,10 +4,8 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
-import com.example.data.db.dao.AppLockDao
-import com.example.data.db.entities.LockedApp
 
-@Database(entities = [LockedApp::class], version = 1, exportSchema = false)
+@Database(entities = [LockedAppEntity::class], version = 1, exportSchema = false)
 abstract class AppGuardDatabase : RoomDatabase() {
     abstract fun appLockDao(): AppLockDao
 
@@ -20,8 +18,8 @@ abstract class AppGuardDatabase : RoomDatabase() {
                 val instance = Room.databaseBuilder(
                     context.applicationContext,
                     AppGuardDatabase::class.java,
-                    "appguard_db"
-                ).build()
+                    "app_guard_database"
+                ).fallbackToDestructiveMigration().build()
                 INSTANCE = instance
                 instance
             }

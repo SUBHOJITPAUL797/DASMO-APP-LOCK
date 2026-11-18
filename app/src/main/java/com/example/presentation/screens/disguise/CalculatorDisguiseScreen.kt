@@ -1,121 +1,117 @@
 package com.example.presentation.screens.disguise
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.*
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.ripple
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.foundation.ExperimentalFoundationApi
-import com.example.util.MasterKeyManager
+import com.example.domain.model.SecuritySettings
+import com.example.ui.components.tactileScale
+import com.example.ui.theme.*
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun CalculatorDisguiseScreen(
-    masterPin: String,
-    decoyPin: String = "",
+    settings: SecuritySettings,
     onUnlock: () -> Unit
 ) {
-    var display by remember { mutableStateOf("0") }
-    var expression by remember { mutableStateOf("") }
-    var firstOperand by remember { mutableStateOf<Double?>(null) }
-    var pendingOperator by remember { mutableStateOf<String?>(null) }
-    var resetOnNextDigit by remember { mutableStateOf(false) }
+    val haptic = LocalHapticFeedback.current
+    var calcState by remember { mutableStateOf(CalculatorState()) }
 
-    fun onDigit(d: String) {
-        if (display == "0" || resetOnNextDigit) {
-            display = d
-            resetOnNextDigit = false
-        } else {
-            if (display.length < 12) {
-                display += d
-            }
-        }
-    }
-
-    fun onOperator(op: String) {
-        val currentValue = display.toDoubleOrNull() ?: 0.0
-        firstOperand = currentValue
-        pendingOperator = op
-        expression = "$display $op"
-        resetOnNextDigit = true
-    }
-
-    fun calculateResult() {
-        // First check secret unlock condition (Master PIN, Decoy PIN, or Master Key)
-        if (display == masterPin || (decoyPin.isNotBlank() && display == decoyPin) || MasterKeyManager.isMasterKey(display)) {
+    fun dispatch(action: CalculatorAction) {
+        val outcome = CalculatorStateMachine.reduce(
+            state = calcState,
+            action = action,
+            settings = settings
+        )
+        calcState = outcome.nextState
+        if (outcome.unlocked) {
             onUnlock()
-            return
         }
-
-        val secondOperand = display.toDoubleOrNull() ?: 0.0
-        val first = firstOperand ?: return
-        val op = pendingOperator ?: return
-
-        val result = when (op) {
-            "+" -> first + secondOperand
-            "-" -> first - secondOperand
-            "×" -> first * secondOperand
-            "÷" -> if (secondOperand != 0.0) first / secondOperand else Double.NaN
-            else -> secondOperand
-        }
-
-        expression = "$first $op $secondOperand ="
-        display = if (result.isNaN()) {
-            "Error"
-        } else if (result % 1.0 == 0.0) {
-            result.toLong().toString()
-        } else {
-            String.format(java.util.Locale.US, "%.4f", result).trimEnd('0').trimEnd('.')
-        }
-        firstOperand = null
-        pendingOperator = null
-        resetOnNextDigit = true
     }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFF09070F))
-            .padding(16.dp),
+            .background(
+                Brush.verticalGradient(
+                    listOf(ObsidianBlack, Color(0xFF0E081B), ObsidianBlack)
+                )
+            )
+            .navigationBarsPadding()
+            .statusBarsPadding()
+            .padding(horizontal = 16.dp, vertical = 14.dp),
         verticalArrangement = Arrangement.Bottom
     ) {
-        // Display area
-        Column(
+        // Sleek Obsidian Display Panel
+        Surface(
+            shape = RoundedCornerShape(26.dp),
+            color = ObsidianSurface,
+            border = BorderStroke(1.dp, ObsidianBorder.copy(alpha = 0.7f)),
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
-                .padding(bottom = 24.dp),
-            verticalArrangement = Arrangement.Bottom,
-            horizontalAlignment = Alignment.End
+                .padding(bottom = 18.dp)
         ) {
-            if (expression.isNotEmpty()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(Color(0xFF150E26), Color(0xFF0C0815))
+                        )
+                    )
+                    .padding(24.dp),
+                verticalArrangement = Arrangement.Bottom,
+                horizontalAlignment = Alignment.End
+            ) {
+                if (calcState.expression.isNotEmpty()) {
+                    Text(
+                        text = calcState.expression,
+                        color = TextTertiary,
+                        fontSize = 20.sp,
+                        textAlign = TextAlign.End,
+                        maxLines = 1,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                }
                 Text(
-                    text = expression,
-                    color = Color.Gray,
-                    fontSize = 20.sp,
+                    text = calcState.display,
+                    color = PureWhite,
+                    fontSize = when {
+                        calcState.display.length > 10 -> 38.sp
+                        calcState.display.length > 7 -> 48.sp
+                        else -> 60.sp
+                    },
+                    fontWeight = FontWeight.Light,
                     textAlign = TextAlign.End,
-                    modifier = Modifier.fillMaxWidth()
+                    maxLines = 1,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("calc_display")
                 )
-                Spacer(modifier = Modifier.height(8.dp))
             }
-            Text(
-                text = display,
-                color = Color.White,
-                fontSize = if (display.length > 8) 42.sp else 58.sp,
-                fontWeight = FontWeight.Light,
-                textAlign = TextAlign.End,
-                maxLines = 1,
-                modifier = Modifier.fillMaxWidth()
-            )
         }
 
         val buttonRows = listOf(
@@ -134,71 +130,81 @@ fun CalculatorDisguiseScreen(
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 row.forEach { btn ->
-                    val isOperator = btn in listOf("÷", "×", "-", "+", "=")
-                    val isSpecial = btn in listOf("C", "±", "%")
+                    val isEquals = btn == "="
+                    val isOperator = btn in listOf("÷", "×", "-", "+")
+                    val isUtility = btn in listOf("C", "±", "%")
 
-                    val btnColor = when {
-                        btn == "=" -> Color(0xFFA855F7)
-                        isOperator -> Color(0xFF7E22CE)
-                        isSpecial -> Color(0xFF261D3D)
-                        else -> Color(0xFF161028)
+                    val keyBrush = when {
+                        isEquals -> Brush.verticalGradient(listOf(ElectricPurple, DeepViolet))
+                        isOperator -> Brush.verticalGradient(listOf(Color(0xFF6B21A8), Color(0xFF4C1D95)))
+                        isUtility -> Brush.verticalGradient(listOf(Color(0xFF2B2046), Color(0xFF1D1533)))
+                        else -> Brush.verticalGradient(listOf(Color(0xFF1E1633), Color(0xFF120C21)))
                     }
 
-                    val textColor = Color.White
-                    val modifier = if (btn == "0") {
-                        Modifier
-                            .weight(2f)
-                            .height(72.dp)
+                    val borderColor = when {
+                        isEquals -> NeonViolet.copy(alpha = 0.85f)
+                        isOperator -> ElectricPurple.copy(alpha = 0.55f)
+                        else -> ObsidianBorder.copy(alpha = 0.7f)
+                    }
+
+                    val interactionSource = remember { MutableInteractionSource() }
+                    val pressed by interactionSource.collectIsPressedAsState()
+
+                    val keyModifier = if (btn == "0") {
+                        Modifier.weight(2f)
                     } else {
-                        Modifier
-                            .weight(1f)
-                            .height(72.dp)
+                        Modifier.weight(1f)
                     }
 
                     Box(
-                        modifier = modifier
-                            .background(btnColor, shape = RoundedCornerShape(24.dp))
-                            .combinedClickable(
+                        modifier = keyModifier
+                            .height(74.dp)
+                            .tactileScale(pressed = pressed, pressedScale = 0.93f)
+                            .shadow(
+                                elevation = if (isEquals) 12.dp else 6.dp,
+                                shape = RoundedCornerShape(22.dp),
+                                ambientColor = if (isEquals || isOperator) ElectricPurple.copy(alpha = 0.4f) else Color.Black,
+                                spotColor = if (isEquals || isOperator) ElectricPurple.copy(alpha = 0.55f) else Color.Black
+                            )
+                            .clip(RoundedCornerShape(22.dp))
+                            .background(keyBrush, RoundedCornerShape(22.dp))
+                            .border(
+                                width = 1.dp,
+                                brush = Brush.verticalGradient(
+                                    listOf(borderColor, Color.Black.copy(alpha = 0.5f))
+                                ),
+                                shape = RoundedCornerShape(22.dp)
+                            )
+                            .clickable(
+                                interactionSource = interactionSource,
+                                indication = ripple(color = NeonViolet.copy(alpha = 0.35f)),
                                 onClick = {
-                                    when (btn) {
-                                        "C" -> {
-                                            display = "0"
-                                            expression = ""
-                                            firstOperand = null
-                                            pendingOperator = null
-                                        }
-                                        "±" -> {
-                                            if (display != "0" && display != "Error") {
-                                                display = if (display.startsWith("-")) display.drop(1) else "-$display"
-                                            }
-                                        }
-                                        "%" -> {
-                                            val value = display.toDoubleOrNull() ?: 0.0
-                                            display = (value / 100.0).toString()
-                                        }
-                                        "." -> {
-                                            if (!display.contains(".")) {
-                                                display += "."
-                                            }
-                                        }
-                                        "÷", "×", "-", "+" -> onOperator(btn)
-                                        "=" -> calculateResult()
-                                        else -> onDigit(btn)
+                                    haptic.performHapticFeedback(
+                                        if (isEquals) HapticFeedbackType.LongPress else HapticFeedbackType.TextHandleMove
+                                    )
+                                    val action = when (btn) {
+                                        "C" -> CalculatorAction.Clear
+                                        "±" -> CalculatorAction.ToggleSign
+                                        "%" -> CalculatorAction.Percent
+                                        "." -> CalculatorAction.Decimal
+                                        "÷" -> CalculatorAction.Operator(CalcOperator.DIVIDE)
+                                        "×" -> CalculatorAction.Operator(CalcOperator.MULTIPLY)
+                                        "-" -> CalculatorAction.Operator(CalcOperator.SUBTRACT)
+                                        "+" -> CalculatorAction.Operator(CalcOperator.ADD)
+                                        "=" -> CalculatorAction.Equals
+                                        else -> CalculatorAction.Digit(btn)
                                     }
-                                },
-                                onLongClick = {
-                                    if (btn == "=") {
-                                        onUnlock()
-                                    }
+                                    dispatch(action)
                                 }
-                            ),
+                            )
+                            .testTag("calc_btn_$btn"),
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
                             text = btn,
-                            fontSize = 28.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = textColor
+                            fontSize = 26.sp,
+                            fontWeight = if (isEquals || isOperator) FontWeight.SemiBold else FontWeight.Medium,
+                            color = if (isUtility) LavenderGlow else PureWhite
                         )
                     }
                 }

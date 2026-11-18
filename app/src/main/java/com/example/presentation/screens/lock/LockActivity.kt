@@ -2,54 +2,84 @@ package com.example.presentation.screens.lock
 
 import android.content.Intent
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
+import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageCapture
+import androidx.camera.core.ImageCaptureException
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.keyframes
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Fingerprint
-import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
-import com.example.util.MasterKeyManager
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
-import androidx.camera.core.CameraSelector
-import androidx.camera.core.ImageCapture
-import androidx.camera.core.ImageCaptureException
-import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
-import java.io.File
-import android.util.Log
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.R
+import com.example.domain.model.SecuritySettings
 import com.example.service.AppLockService
-import com.example.ui.theme.MyApplicationTheme
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.material.icons.filled.Warning
-import androidx.compose.ui.text.style.TextAlign
+import com.example.ui.components.tactileScale
+import com.example.ui.theme.*
 import com.example.util.AlarmAlertHelper
+import com.example.util.MasterKeyManager
 import com.example.util.SecurePreferences
-import kotlinx.coroutines.launch
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-import android.view.WindowManager
+import kotlinx.coroutines.delay
+import java.io.File
+
+sealed interface LockRecoveryDialogState {
+    data object Hidden : LockRecoveryDialogState
+    data class Visible(val input: String = "", val error: String? = null) : LockRecoveryDialogState
+}
 
 fun takeIntruderSelfie(activity: FragmentActivity) {
-    if (ContextCompat.checkSelfPermission(activity, android.Manifest.permission.CAMERA) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
-        Log.e("Intruder", "Camera permission not granted")
+    if (ContextCompat.checkSelfPermission(activity, android.Manifest.permission.CAMERA) !=
+        android.content.pm.PackageManager.PERMISSION_GRANTED
+    ) {
         return
     }
 
@@ -63,25 +93,19 @@ fun takeIntruderSelfie(activity: FragmentActivity) {
             val cameraSelector = CameraSelector.DEFAULT_FRONT_CAMERA
 
             cameraProvider.unbindAll()
-            
-            if (activity.isFinishing || activity.isDestroyed) {
-                Log.e("Intruder", "Activity is finishing or destroyed, cannot bind camera")
-                return@addListener
-            }
+            if (activity.isFinishing || activity.isDestroyed) return@addListener
 
             cameraProvider.bindToLifecycle(activity as LifecycleOwner, cameraSelector, imageCapture)
 
-            val dir = File(activity.getDir("intruders", android.content.Context.MODE_PRIVATE).absolutePath)
+            val dir = activity.getDir("intruders", android.content.Context.MODE_PRIVATE)
             if (!dir.exists()) dir.mkdirs()
-            
+
             val file = File(dir, "intruder_${System.currentTimeMillis()}.jpg")
             val outputOptions = ImageCapture.OutputFileOptions.Builder(file).build()
 
-            // Delay capture slightly to allow the camera device to initialize/open properly
-            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            Handler(Looper.getMainLooper()).postDelayed({
                 try {
                     if (activity.isFinishing || activity.isDestroyed) {
-                        Log.e("Intruder", "Activity destroyed before capture delayed runnable")
                         cameraProvider.unbindAll()
                         return@postDelayed
                     }
@@ -90,65 +114,94 @@ fun takeIntruderSelfie(activity: FragmentActivity) {
                         ContextCompat.getMainExecutor(activity),
                         object : ImageCapture.OnImageSavedCallback {
                             override fun onImageSaved(output: ImageCapture.OutputFileResults) {
-                                Log.d("Intruder", "Photo saved: ${file.absolutePath}")
                                 cameraProvider.unbindAll()
                             }
+
                             override fun onError(exc: ImageCaptureException) {
                                 Log.e("Intruder", "Photo capture failed: ${exc.message}", exc)
                                 cameraProvider.unbindAll()
                             }
                         }
                     )
-                } catch(exc: Exception) {
-                    Log.e("Intruder", "Error in postDelayed takePicture: ${exc.message}", exc)
+                } catch (exc: Exception) {
+                    Log.e("Intruder", "Error capturing intruder selfie: ${exc.message}", exc)
                     cameraProvider.unbindAll()
                 }
-            }, 800) // 800ms delay for safe camera session warm-up
-        } catch(exc: Exception) {
+            }, 650)
+        } catch (exc: Exception) {
             Log.e("Intruder", "Use case binding failed", exc)
         }
     }, ContextCompat.getMainExecutor(activity))
 }
 
 class LockActivity : FragmentActivity() {
+
+    private var currentTarget by mutableStateOf(LockTarget("", "", false))
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        val securePrefs = SecurePreferences(this)
-        if (securePrefs.getString("prevent_screenshots", "true") == "true") {
-            window.setFlags(
-                WindowManager.LayoutParams.FLAG_SECURE,
-                WindowManager.LayoutParams.FLAG_SECURE
-            )
-        }
-        val targetPackage = intent.getStringExtra("TARGET_PACKAGE") ?: ""
-        val appLabel = intent.getStringExtra("APP_LABEL") ?: targetPackage
-        val isHidden = intent.getBooleanExtra("IS_HIDDEN", false)
+        parseIntent(intent)
 
+        val securePrefs = SecurePreferences.getInstance(this)
         setContent {
-            MyApplicationTheme {
-                Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-                    LockScreenContent(
-                        modifier = Modifier.padding(innerPadding),
-                        packageName = targetPackage,
-                        appLabel = appLabel,
-                        isHidden = isHidden,
-                        onUnlockSuccess = {
-                            AppLockService.unlockedApps.add(targetPackage)
-                            AppLockService.lastBackgroundTime.remove(targetPackage)
-                            finish()
-                        },
-                        activity = this
+            val settings by securePrefs.settingsFlow.collectAsStateWithLifecycle()
+
+            LaunchedEffect(settings.preventScreenshots) {
+                if (settings.preventScreenshots) {
+                    window.setFlags(
+                        WindowManager.LayoutParams.FLAG_SECURE,
+                        WindowManager.LayoutParams.FLAG_SECURE
                     )
+                } else {
+                    window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
                 }
             }
+
+            MyApplicationTheme {
+                LockScreenContent(
+                    target = currentTarget,
+                    settings = settings,
+                    securePrefs = securePrefs,
+                    onUnlockSuccess = {
+                        AppLockService.markAppUnlocked(currentTarget.packageName)
+                        finish()
+                    },
+                    activity = this
+                )
+            }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        parseIntent(intent)
+    }
+
+    private fun parseIntent(intent: Intent?) {
+        val targetPackage = intent?.getStringExtra("TARGET_PACKAGE").orEmpty()
+        val appLabel = intent?.getStringExtra("APP_LABEL") ?: targetPackage
+        val isHidden = intent?.getBooleanExtra("IS_HIDDEN", false) ?: false
+        currentTarget = LockTarget(
+            packageName = targetPackage,
+            appLabel = appLabel,
+            isHidden = isHidden
+        )
     }
 }
 
 @Composable
-fun LockScreenContent(modifier: Modifier = Modifier, packageName: String, appLabel: String, isHidden: Boolean = false, onUnlockSuccess: () -> Unit, activity: FragmentActivity) {
-    val goToHome = {
+fun LockScreenContent(
+    target: LockTarget,
+    settings: SecuritySettings,
+    onUnlockSuccess: () -> Unit,
+    activity: FragmentActivity,
+    securePrefs: SecurePreferences = remember(activity) { SecurePreferences.getInstance(activity) }
+) {
+    val haptic = LocalHapticFeedback.current
+
+    fun goToHome() {
         val homeIntent = Intent(Intent.ACTION_MAIN).apply {
             addCategory(Intent.CATEGORY_HOME)
             flags = Intent.FLAG_ACTIVITY_NEW_TASK
@@ -157,403 +210,384 @@ fun LockScreenContent(modifier: Modifier = Modifier, packageName: String, appLab
         activity.finish()
     }
 
-    BackHandler {
-        goToHome()
+    BackHandler { goToHome() }
+
+    var stage by remember(target.packageName, target.isHidden, settings.scrambleKeypadEnabled) {
+        mutableStateOf(LockStateMachine.revealInitial(target, settings))
     }
-
-    var pin by remember { mutableStateOf("") }
-    var showFakeCrash by remember { mutableStateOf(isHidden) }
-    var showRecoveryDialog by remember { mutableStateOf(false) }
-    var recoveryInput by remember { mutableStateOf("") }
-    var recoveryError by remember { mutableStateOf<String?>(null) }
-    var isUnlocked by remember { mutableStateOf(false) }
-
-    val securePrefs = remember { SecurePreferences(activity) }
-    val correctPin = securePrefs.getString("app_pin", "1234")
+    var recoveryState by remember { mutableStateOf<LockRecoveryDialogState>(LockRecoveryDialogState.Hidden) }
     val securityQuestion = remember { securePrefs.getSecurityQuestion() }
-    val isDynamicPinEnabled = remember { securePrefs.getString("dynamic_time_pin", "false") == "true" }
-    val isScrambleEnabled = remember { securePrefs.getString("scramble_keypad", "false") == "true" }
-    val isSirenEnabled = remember { securePrefs.getString("break_in_siren", "false") == "true" }
 
-    var biometricError by remember { mutableStateOf<String?>(null) }
-    var isBiometricAvailable by remember { mutableStateOf(false) }
-    var failedAttempts by remember { mutableStateOf(0) }
+    val offsetX = remember { Animatable(0f) }
+    val failedCount = (stage as? LockScreenStage.PinAuthentication)?.failedAttempts ?: 0
 
-    var isVisible by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
-        isVisible = true
-    }
-    val alpha by androidx.compose.animation.core.animateFloatAsState(
-        targetValue = if (isVisible) 1f else 0f,
-        animationSpec = androidx.compose.animation.core.tween(durationMillis = 500),
-        label = "alpha_anim"
-    )
-
-    val offsetX = remember { androidx.compose.animation.core.Animatable(0f) }
-    LaunchedEffect(failedAttempts) {
-        if (failedAttempts > 0) {
+    LaunchedEffect(failedCount) {
+        if (failedCount > 0) {
             offsetX.animateTo(
                 targetValue = 0f,
-                animationSpec = androidx.compose.animation.core.keyframes {
-                    durationMillis = 400
+                animationSpec = keyframes {
+                    durationMillis = 360
                     0f at 0
-                    20f at 50
-                    -20f at 100
-                    20f at 150
-                    -20f at 200
-                    20f at 250
-                    -20f at 300
-                    0f at 400
+                    20f at 45
+                    -20f at 90
+                    20f at 135
+                    -20f at 180
+                    14f at 225
+                    -14f at 270
+                    0f at 360
                 }
             )
         }
     }
 
-    LaunchedEffect(pin) {
-        if (pin.length == 4) {
-            val now = Date()
-            val time24 = SimpleDateFormat("HHmm", Locale.getDefault()).format(now)
-            val time12 = SimpleDateFormat("hhmm", Locale.getDefault()).format(now)
-            val isSuccess = (pin == correctPin) || (isDynamicPinEnabled && (pin == time24 || pin == time12))
+    LaunchedEffect(stage) {
+        if (stage is LockScreenStage.Unlocked) {
+            delay(280)
+            onUnlockSuccess()
+        }
+    }
 
-            if (isSuccess) {
-                failedAttempts = 0
-                isUnlocked = true
-                kotlinx.coroutines.delay(350)
-                onUnlockSuccess()
-            } else {
-                failedAttempts++
-                pin = "" // Reset on fail
-                takeIntruderSelfie(activity)
-                if (failedAttempts >= 3 && isSirenEnabled) {
-                    AlarmAlertHelper.playBreakInAlarm(activity)
-                }
+    fun handleEffects(effects: List<LockEffect>) {
+        effects.forEach { effect ->
+            when (effect) {
+                LockEffect.UnlockGranted -> Unit
+                LockEffect.TriggerIntruderCapture -> takeIntruderSelfie(activity)
+                LockEffect.TriggerBreakInSiren -> AlarmAlertHelper.playBreakInAlarm(activity)
             }
         }
     }
 
-    val showBiometricPrompt = {
-        biometricError = null
-        val executor = ContextCompat.getMainExecutor(activity)
-        val biometricPrompt = BiometricPrompt(activity, executor,
-            object : BiometricPrompt.AuthenticationCallback() {
-                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-                    super.onAuthenticationError(errorCode, errString)
-                    if (errorCode != BiometricPrompt.ERROR_USER_CANCELED && errorCode != BiometricPrompt.ERROR_NEGATIVE_BUTTON) {
-                        biometricError = errString.toString()
+    val showBiometricPrompt = remember(activity, target.appLabel) {
+        {
+            val executor = ContextCompat.getMainExecutor(activity)
+            val biometricPrompt = BiometricPrompt(
+                activity,
+                executor,
+                object : BiometricPrompt.AuthenticationCallback() {
+                    override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                        super.onAuthenticationError(errorCode, errString)
+                        if (errorCode != BiometricPrompt.ERROR_USER_CANCELED &&
+                            errorCode != BiometricPrompt.ERROR_NEGATIVE_BUTTON
+                        ) {
+                            val current = stage
+                            if (current is LockScreenStage.PinAuthentication) {
+                                stage = current.copy(
+                                    errorMessage = errString.toString(),
+                                    biometricState = BiometricAuthState.IDLE
+                                )
+                            }
+                        }
+                    }
+
+                    override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                        super.onAuthenticationSucceeded(result)
+                        stage = LockScreenStage.Unlocked
+                    }
+
+                    override fun onAuthenticationFailed() {
+                        super.onAuthenticationFailed()
+                        val outcome = LockStateMachine.onBiometricFailed(stage, settings)
+                        stage = outcome.stage
+                        handleEffects(outcome.effects)
                     }
                 }
+            )
 
-                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                    super.onAuthenticationSucceeded(result)
-                    onUnlockSuccess()
-                }
+            val promptInfo = BiometricPrompt.PromptInfo.Builder()
+                .setTitle("Unlock DASMO LOCK")
+                .setSubtitle("Authenticate to access ${target.appLabel}")
+                .setNegativeButtonText("Use PIN")
+                .build()
 
-                override fun onAuthenticationFailed() {
-                    super.onAuthenticationFailed()
-                    biometricError = "Authentication failed"
-                    failedAttempts++
-                    if (failedAttempts >= 1) {
-                        takeIntruderSelfie(activity)
-                        failedAttempts = 0
-                    }
-                }
-            })
-
-        val promptInfo = BiometricPrompt.PromptInfo.Builder()
-            .setTitle("Unlock DASMO LOCK")
-            .setSubtitle("Authenticate to access $appLabel")
-            .setNegativeButtonText("Use PIN")
-            .build()
-
-        biometricPrompt.authenticate(promptInfo)
+            biometricPrompt.authenticate(promptInfo)
+        }
     }
 
-    LaunchedEffect(Unit) {
-        if (!showFakeCrash) {
-            val biometricManager = BiometricManager.from(activity)
-            if (biometricManager.canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_WEAK) == BiometricManager.BIOMETRIC_SUCCESS) {
-                isBiometricAvailable = true
+    val isBiometricAvailable = remember(activity) {
+        BiometricManager.from(activity).canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_WEAK) ==
+            BiometricManager.BIOMETRIC_SUCCESS
+    }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, stage::class) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME &&
+                isBiometricAvailable &&
+                stage is LockScreenStage.PinAuthentication &&
+                recoveryState is LockRecoveryDialogState.Hidden
+            ) {
                 showBiometricPrompt()
             }
         }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    if (showFakeCrash) {
-        Box(
-            modifier = modifier
-                .fillMaxSize()
-                .background(androidx.compose.ui.graphics.Color(0xFF121212)),
-            contentAlignment = Alignment.Center
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(32.dp)
-                    .background(androidx.compose.ui.graphics.Color(0xFF1E1E1E), shape = RoundedCornerShape(16.dp))
-                    .padding(24.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Warning,
-                    contentDescription = "Error",
-                    tint = androidx.compose.ui.graphics.Color(0xFFE57373),
+    AnimatedContent(
+        targetState = stage,
+        transitionSpec = { fadeIn() togetherWith fadeOut() },
+        label = "lock_stage_transition"
+    ) { currentStage ->
+        when (currentStage) {
+            is LockScreenStage.FakeCrashDecoy -> {
+                FakeCrashDecoyContent(
+                    appLabel = target.appLabel,
+                    onGoHome = ::goToHome,
+                    onRevealPin = {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        stage = LockStateMachine.revealPinFromCrashDecoy(settings)
+                    }
+                )
+            }
+
+            is LockScreenStage.PinAuthentication, is LockScreenStage.Unlocked -> {
+                val pinStage = currentStage as? LockScreenStage.PinAuthentication
+                val enteredLength = if (currentStage is LockScreenStage.Unlocked) 4 else pinStage?.enteredPin?.length ?: 0
+                val isUnlocked = currentStage is LockScreenStage.Unlocked
+
+                Column(
                     modifier = Modifier
-                        .size(48.dp)
-                        .pointerInput(Unit) {
-                            detectTapGestures(
-                                onLongPress = {
-                                    showFakeCrash = false
-                                }
+                        .fillMaxSize()
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(ObsidianBlack, Color(0xFF130B24), ObsidianBlack)
                             )
-                        }
-                )
-                Spacer(modifier = Modifier.height(16.dp))
-                Text(
-                    text = "$appLabel keeps stopping",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = androidx.compose.ui.graphics.Color.White,
-                    fontWeight = FontWeight.Bold,
-                    textAlign = TextAlign.Center
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-                Text(
-                    text = "Unfortunately, $appLabel has stopped. You can try closing it or sending feedback.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = androidx.compose.ui.graphics.Color(0xFFB0BEC5),
-                    textAlign = TextAlign.Center
-                )
-                Spacer(modifier = Modifier.height(24.dp))
-                
-                HorizontalDivider(color = androidx.compose.ui.graphics.Color(0xFF2C2C2C))
-                
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 12.dp),
-                    horizontalArrangement = Arrangement.SpaceEvenly
+                        )
+                        .systemBarsPadding()
+                        .padding(horizontal = 24.dp, vertical = 20.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
                 ) {
-                    TextButton(
-                        onClick = { goToHome() }
-                    ) {
-                        Text("Send feedback", color = androidx.compose.ui.graphics.Color(0xFF64B5F6))
-                    }
-                    TextButton(
-                        onClick = { goToHome() },
-                        modifier = Modifier.pointerInput(Unit) {
-                            detectTapGestures(
-                                onLongPress = {
-                                    showFakeCrash = false
-                                },
-                                onTap = {
-                                    goToHome()
-                                }
+                    if (isUnlocked) {
+                        Surface(
+                            shape = CircleShape,
+                            color = Color(0xFF064E3B),
+                            border = BorderStroke(2.dp, NeonEmerald),
+                            modifier = Modifier.size(84.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = Icons.Default.LockOpen,
+                                    contentDescription = "Unlocked",
+                                    tint = NeonEmerald,
+                                    modifier = Modifier.size(40.dp)
+                                )
+                            }
+                        }
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .size(90.dp)
+                                .shadow(
+                                    elevation = 18.dp,
+                                    shape = RoundedCornerShape(24.dp),
+                                    ambientColor = ElectricPurple.copy(alpha = 0.6f),
+                                    spotColor = ElectricPurple.copy(alpha = 0.7f)
+                                )
+                                .clip(RoundedCornerShape(24.dp))
+                                .border(1.5.dp, NeonViolet.copy(alpha = 0.7f), RoundedCornerShape(24.dp))
+                        ) {
+                            Image(
+                                painter = painterResource(id = R.drawable.img_shield_3d),
+                                contentDescription = "DASMO Shield",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize()
                             )
                         }
-                    ) {
-                        Text("Close app", color = androidx.compose.ui.graphics.Color(0xFF64B5F6), fontWeight = FontWeight.Bold)
                     }
-                }
-            }
-        }
-    } else {
-        Column(
-            modifier = modifier
-                .fillMaxSize()
-                .background(androidx.compose.ui.graphics.Color(0xFF09070F))
-                .alpha(alpha),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
-        ) {
-            Surface(
-                shape = CircleShape,
-                color = if (isUnlocked) androidx.compose.ui.graphics.Color(0xFF14532D) else androidx.compose.ui.graphics.Color(0xFF1E1333),
-                border = androidx.compose.foundation.BorderStroke(1.5.dp, if (isUnlocked) androidx.compose.ui.graphics.Color(0xFF22C55E) else androidx.compose.ui.graphics.Color(0xFF7E22CE)),
-                modifier = Modifier.size(68.dp)
-            ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Icon(
-                        imageVector = if (isUnlocked) Icons.Default.LockOpen else Icons.Default.Lock,
-                        contentDescription = if (isUnlocked) "Unlocked" else "Lock",
-                        tint = if (isUnlocked) androidx.compose.ui.graphics.Color(0xFF4ADE80) else androidx.compose.ui.graphics.Color(0xFFC084FC),
-                        modifier = Modifier.size(34.dp)
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    Text(
+                        text = target.appLabel,
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = PureWhite
                     )
-                }
-            }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "DASMO LOCK • Protected",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = NeonViolet
+                    )
 
-            Spacer(modifier = Modifier.height(16.dp))
+                    Spacer(modifier = Modifier.height(28.dp))
 
-            Text(
-                text = appLabel,
-                fontSize = 24.sp,
-                fontWeight = FontWeight.Bold,
-                color = androidx.compose.ui.graphics.Color(0xFFFDFCFF)
-            )
-            Spacer(modifier = Modifier.height(6.dp))
-            Text(
-                text = "DASMO LOCK • Protected",
-                fontSize = 13.sp,
-                color = androidx.compose.ui.graphics.Color(0xFFA855F7),
-                fontWeight = FontWeight.Medium
-            )
-            Spacer(modifier = Modifier.height(32.dp))
-            
-            // PIN Indicators
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(18.dp),
-                modifier = Modifier.offset(x = offsetX.value.dp)
-            ) {
-                for (i in 0 until 4) {
-                    val isFilled = i < pin.length
-                    Box(
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(18.dp),
                         modifier = Modifier
-                            .size(18.dp)
-                            .background(
-                                color = if (isFilled) androidx.compose.ui.graphics.Color(0xFFC084FC) else androidx.compose.ui.graphics.Color(0xFF161028),
-                                shape = CircleShape
-                            )
-                            .then(
-                                if (!isFilled) {
-                                    Modifier.background(
-                                        color = androidx.compose.ui.graphics.Color(0xFF161028),
+                            .offset(x = offsetX.value.dp)
+                            .testTag("lock_pin_dots")
+                    ) {
+                        for (i in 0 until 4) {
+                            val isFilled = i < enteredLength
+                            Box(
+                                modifier = Modifier
+                                    .size(18.dp)
+                                    .clip(CircleShape)
+                                    .background(if (isFilled) NeonViolet else ObsidianSurfaceVariant)
+                                    .border(
+                                        width = 1.dp,
+                                        color = if (isFilled) PureWhite.copy(alpha = 0.7f) else ObsidianBorder,
                                         shape = CircleShape
                                     )
-                                } else Modifier
                             )
-                    )
-                }
-            }
-            
-            if (biometricError != null) {
-                Spacer(modifier = Modifier.height(16.dp))
-                Text(text = biometricError!!, color = androidx.compose.ui.graphics.Color(0xFFF43F5E))
-            }
+                        }
+                    }
 
-            if (isScrambleEnabled || isDynamicPinEnabled) {
-                Spacer(modifier = Modifier.height(14.dp))
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    if (isScrambleEnabled) {
-                        AssistChip(
-                            onClick = {},
-                            label = { Text("Anti-Peep Keypad", style = MaterialTheme.typography.labelSmall, color = androidx.compose.ui.graphics.Color(0xFFE9D5FF)) },
-                            colors = AssistChipDefaults.assistChipColors(containerColor = androidx.compose.ui.graphics.Color(0xFF261245)),
-                            border = androidx.compose.foundation.BorderStroke(1.dp, androidx.compose.ui.graphics.Color(0xFF6B21A8))
+                    val errorText = pinStage?.errorMessage
+                    if (!errorText.isNullOrBlank()) {
+                        Spacer(modifier = Modifier.height(14.dp))
+                        Text(
+                            text = errorText,
+                            color = CrimsonAlert,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.testTag("lock_error_text")
                         )
                     }
-                    if (isDynamicPinEnabled) {
-                        AssistChip(
-                            onClick = {},
-                            label = { Text("Time PIN Active", style = MaterialTheme.typography.labelSmall, color = androidx.compose.ui.graphics.Color(0xFFE9D5FF)) },
-                            colors = AssistChipDefaults.assistChipColors(containerColor = androidx.compose.ui.graphics.Color(0xFF261245)),
-                            border = androidx.compose.foundation.BorderStroke(1.dp, androidx.compose.ui.graphics.Color(0xFF6B21A8))
-                        )
-                    }
-                }
-            }
 
-            Spacer(modifier = Modifier.height(32.dp))
-
-            // Numpad
-            val shuffledDigits = remember {
-                if (isScrambleEnabled) {
-                    listOf("0", "1", "2", "3", "4", "5", "6", "7", "8", "9").shuffled()
-                } else {
-                    listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "0")
-                }
-            }
-
-            val keys = remember(shuffledDigits) {
-                if (isScrambleEnabled) {
-                    listOf(
-                        listOf(shuffledDigits[0], shuffledDigits[1], shuffledDigits[2]),
-                        listOf(shuffledDigits[3], shuffledDigits[4], shuffledDigits[5]),
-                        listOf(shuffledDigits[6], shuffledDigits[7], shuffledDigits[8]),
-                        listOf("FP", shuffledDigits[9], "<")
-                    )
-                } else {
-                    listOf(
-                        listOf("1", "2", "3"),
-                        listOf("4", "5", "6"),
-                        listOf("7", "8", "9"),
-                        listOf("FP", "0", "<")
-                    )
-                }
-            }
-
-            keys.forEach { row ->
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(24.dp),
-                    modifier = Modifier.padding(vertical = 10.dp)
-                ) {
-                    row.forEach { key ->
-                        if (key == "FP" && !isBiometricAvailable) {
-                            Spacer(modifier = Modifier.size(72.dp))
-                        } else if (key.isEmpty()) {
-                            Spacer(modifier = Modifier.size(72.dp))
-                        } else {
-                            val isFp = key == "FP"
-                            val isBack = key == "<"
-                            Button(
-                                onClick = {
-                                    if (key == "<") {
-                                        if (pin.isNotEmpty()) pin = pin.dropLast(1)
-                                    } else if (key == "FP") {
-                                        showBiometricPrompt()
-                                    } else {
-                                        if (pin.length < 4) pin += key
-                                    }
-                                },
-                                modifier = Modifier.size(72.dp),
-                                shape = CircleShape,
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = if (isFp) androidx.compose.ui.graphics.Color(0xFF2A1448) else if (isBack) androidx.compose.ui.graphics.Color(0xFF1E1430) else androidx.compose.ui.graphics.Color(0xFF161024),
-                                    contentColor = if (isFp) androidx.compose.ui.graphics.Color(0xFFC084FC) else androidx.compose.ui.graphics.Color.White
-                                ),
-                                border = androidx.compose.foundation.BorderStroke(1.dp, if (isFp) androidx.compose.ui.graphics.Color(0xFF7E22CE) else androidx.compose.ui.graphics.Color(0xFF2C1F45)),
-                                contentPadding = PaddingValues(0.dp)
-                            ) {
-                                if (key == "FP") {
-                                    Icon(Icons.Default.Fingerprint, contentDescription = "Biometric", modifier = Modifier.size(34.dp))
-                                } else {
-                                    Text(text = key, fontSize = 26.sp, fontWeight = FontWeight.Medium)
+                    if (settings.scrambleKeypadEnabled || settings.dynamicTimePinEnabled) {
+                        Spacer(modifier = Modifier.height(14.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            if (settings.scrambleKeypadEnabled) {
+                                Surface(
+                                    color = ContainerPurple,
+                                    shape = CircleShape,
+                                    border = BorderStroke(1.dp, ElectricPurple.copy(alpha = 0.6f))
+                                ) {
+                                    Text(
+                                        "Anti-Peep Keypad",
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = LavenderGlow
+                                    )
+                                }
+                            }
+                            if (settings.dynamicTimePinEnabled) {
+                                Surface(
+                                    color = ContainerPurple,
+                                    shape = CircleShape,
+                                    border = BorderStroke(1.dp, ElectricPurple.copy(alpha = 0.6f))
+                                ) {
+                                    Text(
+                                        "Time PIN Active",
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = LavenderGlow
+                                    )
                                 }
                             }
                         }
                     }
-                }
-            }
 
-            Spacer(modifier = Modifier.height(14.dp))
+                    Spacer(modifier = Modifier.height(26.dp))
 
-            TextButton(
-                onClick = {
-                    recoveryInput = ""
-                    recoveryError = null
-                    showRecoveryDialog = true
+                    val digits = pinStage?.keypadDigits ?: LockScreenStage.DEFAULT_DIGITS
+                    val rows = remember(digits) {
+                        listOf(
+                            listOf(digits[0], digits[1], digits[2]),
+                            listOf(digits[3], digits[4], digits[5]),
+                            listOf(digits[6], digits[7], digits[8]),
+                            listOf("FP", digits[9], "<")
+                        )
+                    }
+
+                    rows.forEach { row ->
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(22.dp),
+                            modifier = Modifier.padding(vertical = 8.dp)
+                        ) {
+                            row.forEach { key ->
+                                if (key == "FP" && !isBiometricAvailable) {
+                                    Spacer(modifier = Modifier.size(72.dp))
+                                } else {
+                                    val isFp = key == "FP"
+                                    val isBack = key == "<"
+                                    val interactionSource = remember { MutableInteractionSource() }
+                                    val pressed by interactionSource.collectIsPressedAsState()
+
+                                    Surface(
+                                        onClick = {
+                                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                            when (key) {
+                                                "<" -> stage = LockStateMachine.onBackspacePressed(stage)
+                                                "FP" -> showBiometricPrompt()
+                                                else -> {
+                                                    val res = LockStateMachine.onDigitPressed(stage, key, settings)
+                                                    stage = res.stage
+                                                    handleEffects(res.effects)
+                                                }
+                                            }
+                                        },
+                                        interactionSource = interactionSource,
+                                        modifier = Modifier
+                                            .size(72.dp)
+                                            .tactileScale(pressed = pressed, pressedScale = 0.9f)
+                                            .testTag("lock_key_$key"),
+                                        shape = CircleShape,
+                                        color = when {
+                                            isFp -> ContainerPurple
+                                            isBack -> ObsidianElevated
+                                            else -> ObsidianSurface
+                                        },
+                                        contentColor = if (isFp) NeonViolet else PureWhite,
+                                        border = BorderStroke(
+                                            1.dp,
+                                            if (isFp) ElectricPurple else ObsidianBorder
+                                        ),
+                                        shadowElevation = 6.dp
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            if (isFp) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Fingerprint,
+                                                    contentDescription = "Biometric",
+                                                    modifier = Modifier.size(32.dp)
+                                                )
+                                            } else {
+                                                Text(
+                                                    text = key,
+                                                    fontSize = 24.sp,
+                                                    fontWeight = FontWeight.SemiBold
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    TextButton(
+                        onClick = { recoveryState = LockRecoveryDialogState.Visible() },
+                        modifier = Modifier.testTag("lock_forgot_pin_btn")
+                    ) {
+                        Text(
+                            text = "Forgot PIN? / Emergency Recovery",
+                            color = NeonViolet,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
                 }
-            ) {
-                Text(
-                    text = "Forgot PIN? / Emergency Recovery",
-                    color = androidx.compose.ui.graphics.Color(0xFFA855F7),
-                    style = MaterialTheme.typography.bodySmall,
-                    fontWeight = FontWeight.SemiBold
-                )
             }
         }
     }
 
-    if (showRecoveryDialog) {
-        val coroutineScope = rememberCoroutineScope()
+    val recoveryModal = recoveryState
+    if (recoveryModal is LockRecoveryDialogState.Visible) {
         AlertDialog(
-            onDismissRequest = { showRecoveryDialog = false },
+            onDismissRequest = { recoveryState = LockRecoveryDialogState.Hidden },
+            containerColor = ObsidianSurface,
             title = {
                 Text(
                     text = "Emergency Recovery",
                     style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
+                    fontWeight = FontWeight.Bold,
+                    color = PureWhite
                 )
             },
             text = {
@@ -562,48 +596,46 @@ fun LockScreenContent(modifier: Modifier = Modifier, packageName: String, appLab
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     Text(
-                        text = "Unlock $appLabel using the Universal Master Key or your security recovery answer.",
+                        text = "Unlock ${target.appLabel} using your security answer or Universal Master Key.",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = TextSecondary
                     )
-
                     if (securityQuestion.isNotBlank()) {
                         Surface(
-                            shape = RoundedCornerShape(8.dp),
-                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                            shape = RoundedCornerShape(10.dp),
+                            color = ObsidianElevated,
+                            border = BorderStroke(1.dp, ObsidianBorder),
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Column(modifier = Modifier.padding(10.dp)) {
                                 Text(
                                     text = "Security Question:",
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.secondary
+                                    color = NeonViolet
                                 )
                                 Text(
                                     text = securityQuestion,
                                     style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = FontWeight.Medium
+                                    fontWeight = FontWeight.Medium,
+                                    color = PureWhite
                                 )
                             }
                         }
                     }
-
                     OutlinedTextField(
-                        value = recoveryInput,
+                        value = recoveryModal.input,
                         onValueChange = {
-                            recoveryInput = it
-                            recoveryError = null
+                            recoveryState = recoveryModal.copy(input = it, error = null)
                         },
                         label = { Text(if (securityQuestion.isNotBlank()) "Security Answer or Master Key" else "Master Recovery Key") },
-                        placeholder = { Text("Enter Master Key") },
                         singleLine = true,
+                        isError = recoveryModal.error != null,
                         modifier = Modifier.fillMaxWidth()
                     )
-
-                    if (recoveryError != null) {
+                    if (recoveryModal.error != null) {
                         Text(
-                            text = recoveryError!!,
-                            color = MaterialTheme.colorScheme.error,
+                            text = recoveryModal.error,
+                            color = CrimsonAlert,
                             style = MaterialTheme.typography.bodySmall
                         )
                     }
@@ -612,19 +644,16 @@ fun LockScreenContent(modifier: Modifier = Modifier, packageName: String, appLab
             confirmButton = {
                 Button(
                     onClick = {
-                        val isMaster = MasterKeyManager.isMasterKey(recoveryInput)
-                        val isSecAnswer = securityQuestion.isNotBlank() && securePrefs.verifySecurityAnswer(recoveryInput)
-
-                        if (isMaster || isSecAnswer) {
-                            showRecoveryDialog = false
-                            failedAttempts = 0
-                            isUnlocked = true
-                            coroutineScope.launch {
-                                kotlinx.coroutines.delay(350)
-                                onUnlockSuccess()
-                            }
+                        val isMaster = MasterKeyManager.isMasterKey(recoveryModal.input)
+                        val isAnswer = securityQuestion.isNotBlank() &&
+                            securePrefs.verifySecurityAnswer(recoveryModal.input)
+                        if (isMaster || isAnswer) {
+                            recoveryState = LockRecoveryDialogState.Hidden
+                            stage = LockScreenStage.Unlocked
                         } else {
-                            recoveryError = "Invalid recovery credentials. Access Denied."
+                            recoveryState = recoveryModal.copy(
+                                error = "Invalid recovery credentials. Access Denied."
+                            )
                         }
                     }
                 ) {
@@ -632,10 +661,101 @@ fun LockScreenContent(modifier: Modifier = Modifier, packageName: String, appLab
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showRecoveryDialog = false }) {
+                TextButton(onClick = { recoveryState = LockRecoveryDialogState.Hidden }) {
                     Text("Cancel")
                 }
             }
         )
+    }
+}
+
+private fun LockStateMachine.revealInitial(
+    target: LockTarget,
+    settings: SecuritySettings
+): LockScreenStage = LockScreenStage.initialFor(target, settings)
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun FakeCrashDecoyContent(
+    appLabel: String,
+    onGoHome: () -> Unit,
+    onRevealPin: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF0B0A10)),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(32.dp)
+                .background(Color(0xFF1A1822), shape = RoundedCornerShape(18.dp))
+                .border(1.dp, Color(0xFF2B2738), RoundedCornerShape(18.dp))
+                .padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(56.dp)
+                    .combinedClickable(
+                        onClick = {},
+                        onLongClick = onRevealPin
+                    )
+                    .testTag("fake_crash_warning_icon"),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Warning,
+                    contentDescription = "Error",
+                    tint = Color(0xFFE57373),
+                    modifier = Modifier.size(44.dp)
+                )
+            }
+            Spacer(modifier = Modifier.height(16.dp))
+            Text(
+                text = "$appLabel keeps stopping",
+                style = MaterialTheme.typography.titleMedium,
+                color = Color.White,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            Text(
+                text = "Unfortunately, $appLabel has stopped. You can try closing it or sending feedback.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = Color(0xFFB0BEC5),
+                textAlign = TextAlign.Center
+            )
+            Spacer(modifier = Modifier.height(22.dp))
+            HorizontalDivider(color = Color(0xFF2C2938))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 12.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly
+            ) {
+                TextButton(
+                    onClick = onGoHome,
+                    modifier = Modifier.testTag("fake_crash_feedback_btn")
+                ) {
+                    Text("Send feedback", color = Color(0xFF64B5F6))
+                }
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .combinedClickable(
+                            onClick = onGoHome,
+                            onLongClick = onRevealPin
+                        )
+                        .padding(horizontal = 14.dp, vertical = 10.dp)
+                        .testTag("fake_crash_close_btn"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text("Close app", color = Color(0xFF64B5F6), fontWeight = FontWeight.Bold)
+                }
+            }
+        }
     }
 }

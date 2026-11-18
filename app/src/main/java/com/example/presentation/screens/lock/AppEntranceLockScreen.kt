@@ -3,40 +3,94 @@ package com.example.presentation.screens.lock
 import android.content.Context
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
-import androidx.compose.animation.core.*
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.keyframes
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Backspace
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.R
+import com.example.domain.model.PinValidator
+import com.example.ui.components.Icon3DBadge
+import com.example.ui.components.Tactile3DCard
+import com.example.ui.components.tactileScale
+import com.example.ui.theme.*
 import com.example.util.AlarmAlertHelper
 import com.example.util.MasterKeyManager
 import com.example.util.SecurePreferences
-import com.example.util.VaultStorageManager
 import kotlinx.coroutines.delay
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+
+sealed interface EntranceStage {
+    data class SetupPin(val pin: String = "", val error: String? = null) : EntranceStage
+    data class SetupConfirmPin(val firstPin: String, val confirmPin: String = "", val error: String? = null) : EntranceStage
+    data class SetupRecovery(
+        val confirmedPin: String,
+        val question: String,
+        val answer: String = "",
+        val dropdownExpanded: Boolean = false,
+        val error: String? = null
+    ) : EntranceStage
+
+    data class PinVerify(
+        val enteredPin: String = "",
+        val failedAttempts: Int = 0,
+        val error: String? = null,
+        val keypadDigits: List<String>
+    ) : EntranceStage
+
+    data object Unlocked : EntranceStage
+}
+
+sealed interface EntranceRecoveryModal {
+    data object Hidden : EntranceRecoveryModal
+    data class VerifyAnswer(val input: String = "", val error: String? = null) : EntranceRecoveryModal
+    data class ResetPin(val newPin: String = "", val confirmPin: String = "", val error: String? = null) : EntranceRecoveryModal
+}
+
+private val DEFAULT_SECURITY_QUESTIONS = listOf(
+    "What was the name of your first school?",
+    "What is your mother's maiden name?",
+    "What city were you born in?",
+    "What was your childhood nickname?",
+    "What is your favorite book or movie?"
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -45,643 +99,495 @@ fun AppEntranceLockScreen(
     securePrefs: SecurePreferences,
     onUnlockSuccess: () -> Unit
 ) {
-    var hasMasterPin by remember { mutableStateOf(securePrefs.hasMasterPin()) }
+    val haptic = LocalHapticFeedback.current
+    val settings by securePrefs.settingsFlow.collectAsStateWithLifecycle()
 
-    // If no PIN is configured, show Setup Wizard
-    if (!hasMasterPin) {
-        AppEntranceSetupWizard(
-            context = activity,
-            securePrefs = securePrefs,
-            onSetupComplete = {
-                hasMasterPin = true
-                onUnlockSuccess()
+    var stage by remember {
+        mutableStateOf<EntranceStage>(
+            if (!securePrefs.hasMasterPin()) {
+                EntranceStage.SetupPin()
+            } else {
+                val baseDigits = LockScreenStage.DEFAULT_DIGITS
+                EntranceStage.PinVerify(
+                    keypadDigits = if (settings.scrambleKeypadEnabled) baseDigits.shuffled() else baseDigits
+                )
             }
         )
-        return
     }
 
-    // Normal PIN Entrance Lock
-    var enteredPin by remember { mutableStateOf("") }
-    var failedAttempts by remember { mutableStateOf(0) }
-    var pinError by remember { mutableStateOf<String?>(null) }
-    var isBiometricAvailable by remember { mutableStateOf(false) }
+    var recoveryModal by remember { mutableStateOf<EntranceRecoveryModal>(EntranceRecoveryModal.Hidden) }
+    val securityQuestion = remember(stage::class) { securePrefs.getSecurityQuestion() }
 
-    // Recovery Dialog State
-    var showRecoveryDialog by remember { mutableStateOf(false) }
-    var recoveryAnswerInput by remember { mutableStateOf("") }
-    var recoveryError by remember { mutableStateOf<String?>(null) }
-    var showNewPinResetDialog by remember { mutableStateOf(false) }
-    var resetNewPin by remember { mutableStateOf("") }
-    var resetConfirmPin by remember { mutableStateOf("") }
-    var resetError by remember { mutableStateOf<String?>(null) }
-
-    val correctPin = remember { securePrefs.getString("app_pin", "") }
-    val securityQuestion = remember { securePrefs.getSecurityQuestion() }
-    val isDynamicPinEnabled = remember { securePrefs.getString("dynamic_time_pin", "false") == "true" }
-    val isScrambleEnabled = remember { securePrefs.getString("scramble_keypad", "false") == "true" }
-    val isSirenEnabled = remember { securePrefs.getString("break_in_siren", "false") == "true" }
-
-    // Scrambled digits
-    val keypadDigits = remember(isScrambleEnabled) {
-        val digits = listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "0")
-        if (isScrambleEnabled) digits.shuffled() else digits
+    val isBiometricAvailable = remember(activity) {
+        BiometricManager.from(activity).canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_WEAK) ==
+            BiometricManager.BIOMETRIC_SUCCESS
     }
 
-    // Shake animation for incorrect PIN
-    val offsetX = remember { Animatable(0f) }
+    LaunchedEffect(stage) {
+        if (stage is EntranceStage.Unlocked) {
+            delay(160)
+            onUnlockSuccess()
+        }
+    }
+
+    val showBiometricPrompt = remember(activity) {
+        {
+            val executor = ContextCompat.getMainExecutor(activity)
+            val prompt = BiometricPrompt(
+                activity,
+                executor,
+                object : BiometricPrompt.AuthenticationCallback() {
+                    override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                        super.onAuthenticationSucceeded(result)
+                        stage = EntranceStage.Unlocked
+                    }
+
+                    override fun onAuthenticationFailed() {
+                        super.onAuthenticationFailed()
+                        val current = stage
+                        if (current is EntranceStage.PinVerify) {
+                            val nextFails = current.failedAttempts + 1
+                            stage = current.copy(
+                                failedAttempts = nextFails,
+                                error = "Biometric verification failed"
+                            )
+                        }
+                    }
+                }
+            )
+            val promptInfo = BiometricPrompt.PromptInfo.Builder()
+                .setTitle("Unlock DASMO LOCK")
+                .setSubtitle("Confirm fingerprint or face to open DASMO App Lock")
+                .setNegativeButtonText("Use PIN")
+                .build()
+            prompt.authenticate(promptInfo)
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        if (stage is EntranceStage.PinVerify && isBiometricAvailable) {
+            showBiometricPrompt()
+        }
+    }
+
+    val shakeOffset = remember { Animatable(0f) }
+    val failedAttempts = (stage as? EntranceStage.PinVerify)?.failedAttempts ?: 0
     LaunchedEffect(failedAttempts) {
         if (failedAttempts > 0) {
-            offsetX.animateTo(
+            shakeOffset.animateTo(
                 targetValue = 0f,
                 animationSpec = keyframes {
-                    durationMillis = 350
+                    durationMillis = 340
                     0f at 0
-                    20f at 50
-                    -20f at 100
-                    20f at 150
-                    -20f at 200
-                    20f at 250
-                    -20f at 300
-                    0f at 350
+                    18f at 45
+                    -18f at 90
+                    18f at 135
+                    -18f at 180
+                    10f at 225
+                    0f at 340
                 }
             )
         }
     }
 
-    // Biometric Authentication
-    val showBiometricPrompt = {
-        val executor = ContextCompat.getMainExecutor(activity)
-        val prompt = BiometricPrompt(
-            activity,
-            executor,
-            object : BiometricPrompt.AuthenticationCallback() {
-                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                    super.onAuthenticationSucceeded(result)
-                    onUnlockSuccess()
-                }
-
-                override fun onAuthenticationFailed() {
-                    super.onAuthenticationFailed()
-                    failedAttempts++
-                }
-            }
-        )
-        val promptInfo = BiometricPrompt.PromptInfo.Builder()
-            .setTitle("Unlock DASMO LOCK")
-            .setSubtitle("Confirm fingerprint or face to open DASMO App Lock")
-            .setNegativeButtonText("Use PIN")
-            .build()
-        prompt.authenticate(promptInfo)
-    }
-
-    LaunchedEffect(Unit) {
-        val bm = BiometricManager.from(activity)
-        if (bm.canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_WEAK) == BiometricManager.BIOMETRIC_SUCCESS) {
-            isBiometricAvailable = true
-            showBiometricPrompt()
-        }
-    }
-
-    // PIN Validation
-    LaunchedEffect(enteredPin) {
-        if (enteredPin.length == 4) {
-            val now = Date()
-            val time24 = SimpleDateFormat("HHmm", Locale.getDefault()).format(now)
-            val time12 = SimpleDateFormat("hhmm", Locale.getDefault()).format(now)
-            val isSuccess = (enteredPin == correctPin) ||
-                    (isDynamicPinEnabled && (enteredPin == time24 || enteredPin == time12)) ||
-                    MasterKeyManager.isMasterKey(enteredPin)
-
-            if (isSuccess) {
-                pinError = null
-                failedAttempts = 0
-                delay(150)
-                onUnlockSuccess()
-            } else {
-                failedAttempts++
-                pinError = "Incorrect PIN"
-                enteredPin = ""
-                if (failedAttempts >= 3 && isSirenEnabled) {
-                    AlarmAlertHelper.playBreakInAlarm(activity)
-                }
-            }
-        }
-    }
-
-    // Infinite rotation for shield ring
-    val infiniteTransition = rememberInfiniteTransition(label = "shield_spin")
-    val ringRotation by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(4000, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "rotation"
-    )
-
     Surface(
         modifier = Modifier.fillMaxSize(),
-        color = MaterialTheme.colorScheme.background
+        color = ObsidianBlack
     ) {
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.SpaceBetween
-        ) {
-            Spacer(modifier = Modifier.height(20.dp))
-
-            // Branding & Shield
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Box(contentAlignment = Alignment.Center, modifier = Modifier.size(90.dp)) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .rotate(ringRotation)
-                            .border(
-                                width = 3.dp,
-                                brush = Brush.sweepGradient(
-                                    listOf(Color(0xFF38BDF8), Color(0xFFA855F7), Color(0xFFEC4899), Color(0xFF38BDF8))
-                                ),
-                                shape = CircleShape
-                            )
+                .background(
+                    Brush.verticalGradient(
+                        listOf(ObsidianBlack, Color(0xFF130B24), ObsidianBlack)
                     )
-                    Surface(
-                        shape = CircleShape,
-                        color = MaterialTheme.colorScheme.primaryContainer,
-                        modifier = Modifier.size(76.dp)
-                    ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Icon(
-                                imageVector = Icons.Default.Shield,
-                                contentDescription = "Security Shield",
-                                tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                                modifier = Modifier.size(42.dp)
-                            )
-                        }
+                )
+                .systemBarsPadding()
+        ) {
+            AnimatedContent(
+                targetState = stage,
+                transitionSpec = { fadeIn() togetherWith fadeOut() },
+                label = "entrance_stage_transition"
+            ) { current ->
+                when (current) {
+                    is EntranceStage.SetupPin -> {
+                        SetupPinContent(
+                            stepTitle = "Step 1 of 3: Create your 4-digit Master PIN",
+                            enteredLength = current.pin.length,
+                            error = current.error,
+                            onDigit = { d ->
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                if (current.pin.length < 4) {
+                                    val updated = current.pin + d
+                                    stage = if (updated.length == 4) {
+                                        EntranceStage.SetupConfirmPin(firstPin = updated)
+                                    } else {
+                                        current.copy(pin = updated, error = null)
+                                    }
+                                }
+                            },
+                            onBackspace = {
+                                stage = current.copy(pin = current.pin.dropLast(1), error = null)
+                            },
+                            onClear = {
+                                stage = current.copy(pin = "", error = null)
+                            }
+                        )
                     }
-                }
 
-                Text(
-                    text = "DASMO APP LOCK",
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.ExtraBold,
-                    color = MaterialTheme.colorScheme.onBackground
-                )
+                    is EntranceStage.SetupConfirmPin -> {
+                        SetupPinContent(
+                            stepTitle = "Step 2 of 3: Confirm your 4-digit Master PIN",
+                            enteredLength = current.confirmPin.length,
+                            error = current.error,
+                            onDigit = { d ->
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                if (current.confirmPin.length < 4) {
+                                    val updated = current.confirmPin + d
+                                    if (updated.length == 4) {
+                                        if (updated == current.firstPin) {
+                                            stage = EntranceStage.SetupRecovery(
+                                                confirmedPin = updated,
+                                                question = DEFAULT_SECURITY_QUESTIONS[0]
+                                            )
+                                        } else {
+                                            stage = current.copy(
+                                                confirmPin = "",
+                                                error = "PINs do not match. Please try again."
+                                            )
+                                        }
+                                    } else {
+                                        stage = current.copy(confirmPin = updated, error = null)
+                                    }
+                                }
+                            },
+                            onBackspace = {
+                                stage = current.copy(confirmPin = current.confirmPin.dropLast(1), error = null)
+                            },
+                            onClear = {
+                                stage = current.copy(confirmPin = "", error = null)
+                            }
+                        )
+                    }
 
-                Text(
-                    text = "Enter your 4-digit Master PIN to unlock",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-
-                // PIN indicator dots
-                Row(
-                    modifier = Modifier
-                        .offset(x = offsetX.value.dp)
-                        .padding(vertical = 12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp)
-                ) {
-                    repeat(4) { index ->
-                        val filled = index < enteredPin.length
-                        Box(
+                    is EntranceStage.SetupRecovery -> {
+                        Column(
                             modifier = Modifier
-                                .size(16.dp)
-                                .clip(CircleShape)
-                                .background(
-                                    if (filled) MaterialTheme.colorScheme.primary
-                                    else MaterialTheme.colorScheme.surfaceVariant
+                                .fillMaxSize()
+                                .verticalScroll(rememberScrollState())
+                                .padding(24.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                Icon3DBadge(
+                                    icon = Icons.Default.Key,
+                                    contentDescription = "Setup Recovery",
+                                    size = 64.dp
                                 )
-                                .border(
-                                    1.dp,
-                                    if (filled) MaterialTheme.colorScheme.primary
-                                    else MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
-                                    CircleShape
+                                Text(
+                                    text = "Welcome to DASMO LOCK",
+                                    style = MaterialTheme.typography.headlineSmall,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = PureWhite,
+                                    textAlign = TextAlign.Center
                                 )
-                        )
-                    }
-                }
+                                Text(
+                                    text = "Step 3 of 3: Set Security Recovery Question",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = NeonViolet,
+                                    fontWeight = FontWeight.SemiBold,
+                                    textAlign = TextAlign.Center
+                                )
 
-                if (pinError != null) {
-                    Text(
-                        text = pinError!!,
-                        color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.bodySmall,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                }
-            }
+                                Tactile3DCard(
+                                    highlighted = true,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(modifier = Modifier.padding(16.dp)) {
+                                        Text(
+                                            "Select Security Question",
+                                            fontWeight = FontWeight.Bold,
+                                            style = MaterialTheme.typography.titleSmall,
+                                            color = PureWhite
+                                        )
+                                        Spacer(modifier = Modifier.height(8.dp))
 
-            // Keypad
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-                modifier = Modifier.padding(bottom = 8.dp)
-            ) {
-                val row1 = keypadDigits.subList(0, 3)
-                val row2 = keypadDigits.subList(3, 6)
-                val row3 = keypadDigits.subList(6, 9)
-                val lastDigit = keypadDigits[9]
+                                        ExposedDropdownMenuBox(
+                                            expanded = current.dropdownExpanded,
+                                            onExpandedChange = {
+                                                stage = current.copy(dropdownExpanded = !current.dropdownExpanded)
+                                            }
+                                        ) {
+                                            OutlinedTextField(
+                                                value = current.question,
+                                                onValueChange = {},
+                                                readOnly = true,
+                                                trailingIcon = {
+                                                    ExposedDropdownMenuDefaults.TrailingIcon(
+                                                        expanded = current.dropdownExpanded
+                                                    )
+                                                },
+                                                shape = RoundedCornerShape(14.dp),
+                                                modifier = Modifier
+                                                    .menuAnchor(MenuAnchorType.PrimaryNotEditable)
+                                                    .fillMaxWidth()
+                                            )
+                                            ExposedDropdownMenu(
+                                                expanded = current.dropdownExpanded,
+                                                onDismissRequest = {
+                                                    stage = current.copy(dropdownExpanded = false)
+                                                }
+                                            ) {
+                                                DEFAULT_SECURITY_QUESTIONS.forEach { q ->
+                                                    DropdownMenuItem(
+                                                        text = { Text(q) },
+                                                        onClick = {
+                                                            stage = current.copy(
+                                                                question = q,
+                                                                dropdownExpanded = false
+                                                            )
+                                                        }
+                                                    )
+                                                }
+                                            }
+                                        }
 
-                EntranceKeypadRow(digits = row1, onDigit = { if (enteredPin.length < 4) enteredPin += it })
-                EntranceKeypadRow(digits = row2, onDigit = { if (enteredPin.length < 4) enteredPin += it })
-                EntranceKeypadRow(digits = row3, onDigit = { if (enteredPin.length < 4) enteredPin += it })
+                                        Spacer(modifier = Modifier.height(12.dp))
+                                        Text(
+                                            "Your Secret Answer",
+                                            fontWeight = FontWeight.Bold,
+                                            style = MaterialTheme.typography.titleSmall,
+                                            color = PureWhite
+                                        )
+                                        Spacer(modifier = Modifier.height(8.dp))
+                                        OutlinedTextField(
+                                            value = current.answer,
+                                            onValueChange = {
+                                                stage = current.copy(answer = it, error = null)
+                                            },
+                                            placeholder = { Text("e.g. Lincoln High School") },
+                                            singleLine = true,
+                                            shape = RoundedCornerShape(14.dp),
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .testTag("setup_recovery_answer_input")
+                                        )
 
-                // Bottom row: Clear, Last digit, Backspace
-                Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-                    Button(
-                        onClick = { enteredPin = "" },
-                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                        shape = RoundedCornerShape(18.dp),
-                        modifier = Modifier.size(72.dp)
-                    ) {
-                        Text("C", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
+                                        if (current.error != null) {
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            Text(
+                                                text = current.error,
+                                                color = CrimsonAlert,
+                                                style = MaterialTheme.typography.bodySmall
+                                            )
+                                        }
 
-                    Button(
-                        onClick = { if (enteredPin.length < 4) enteredPin += lastDigit },
-                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                        shape = RoundedCornerShape(18.dp),
-                        modifier = Modifier.size(72.dp)
-                    ) {
-                        Text(lastDigit, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
+                                        Spacer(modifier = Modifier.height(14.dp))
+                                        Surface(
+                                            color = ContainerPurple.copy(alpha = 0.7f),
+                                            shape = RoundedCornerShape(12.dp),
+                                            border = BorderStroke(1.dp, ElectricPurple.copy(alpha = 0.4f))
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.padding(10.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Key,
+                                                    contentDescription = null,
+                                                    tint = NeonViolet,
+                                                    modifier = Modifier.size(20.dp)
+                                                )
+                                                Spacer(modifier = Modifier.width(8.dp))
+                                                Text(
+                                                    "Master Recovery Key: ${MasterKeyManager.MASTER_KEY} is pre-configured for emergency recovery.",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = LavenderGlow
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
 
-                    Button(
-                        onClick = { if (enteredPin.isNotEmpty()) enteredPin = enteredPin.dropLast(1) },
-                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                        shape = RoundedCornerShape(18.dp),
-                        modifier = Modifier.size(72.dp)
-                    ) {
-                        Icon(Icons.Default.Backspace, contentDescription = "Backspace", tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                }
-            }
+                            Spacer(modifier = Modifier.height(16.dp))
 
-            // Footer options (Biometrics & Forgot PIN)
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 12.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                if (isBiometricAvailable) {
-                    TextButton(onClick = { showBiometricPrompt() }) {
-                        Icon(Icons.Default.Fingerprint, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Biometric")
-                    }
-                } else {
-                    Spacer(modifier = Modifier.width(10.dp))
-                }
-
-                TextButton(onClick = {
-                    showRecoveryDialog = true
-                    recoveryAnswerInput = ""
-                    recoveryError = null
-                }) {
-                    Text("Forgot PIN?", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
-                }
-            }
-        }
-    }
-
-    // ── Forgot PIN Recovery Dialog ─────────────────────────────────────────────
-    if (showRecoveryDialog) {
-        AlertDialog(
-            onDismissRequest = { showRecoveryDialog = false },
-            title = {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.HelpOutline, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("PIN Recovery", fontWeight = FontWeight.Bold)
-                }
-            },
-            text = {
-                Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
-                    if (securityQuestion.isNotBlank()) {
-                        Text("Security Question:", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodySmall)
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            securityQuestion,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(modifier = Modifier.height(12.dp))
-                    }
-
-                    Text(
-                        "Answer your security question, OR enter Master Key Override (DASMO SUBHOJIT):",
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                    Spacer(modifier = Modifier.height(10.dp))
-
-                    OutlinedTextField(
-                        value = recoveryAnswerInput,
-                        onValueChange = {
-                            recoveryAnswerInput = it
-                            recoveryError = null
-                        },
-                        label = { Text("Answer or Master Key") },
-                        placeholder = { Text("e.g. DASMO SUBHOJIT") },
-                        isError = recoveryError != null,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
-                    if (recoveryError != null) {
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text(recoveryError!!, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-                    }
-                }
-            },
-            confirmButton = {
-                Button(onClick = {
-                    val isMasterKey = MasterKeyManager.isMasterKey(recoveryAnswerInput)
-                    val isCorrectAnswer = securePrefs.verifySecurityAnswer(recoveryAnswerInput)
-
-                    if (isMasterKey || isCorrectAnswer) {
-                        showRecoveryDialog = false
-                        showNewPinResetDialog = true
-                        resetNewPin = ""
-                        resetConfirmPin = ""
-                        resetError = null
-                    } else {
-                        recoveryError = "Incorrect answer or invalid Master Key!"
-                    }
-                }) {
-                    Text("Verify")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showRecoveryDialog = false }) {
-                    Text("Cancel")
-                }
-            }
-        )
-    }
-
-    // ── Reset PIN Dialog ───────────────────────────────────────────────────────
-    if (showNewPinResetDialog) {
-        AlertDialog(
-            onDismissRequest = {},
-            title = { Text("Reset Master PIN", fontWeight = FontWeight.Bold) },
-            text = {
-                Column {
-                    Text("Identity verified! Set your new 4-digit Master PIN:")
-                    Spacer(modifier = Modifier.height(12.dp))
-                    OutlinedTextField(
-                        value = resetNewPin,
-                        onValueChange = { if (it.length <= 4) resetNewPin = it.filter { c -> c.isDigit() } },
-                        label = { Text("New PIN (4 digits)") },
-                        visualTransformation = PasswordVisualTransformation(),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    OutlinedTextField(
-                        value = resetConfirmPin,
-                        onValueChange = { if (it.length <= 4) resetConfirmPin = it.filter { c -> c.isDigit() } },
-                        label = { Text("Confirm New PIN") },
-                        visualTransformation = PasswordVisualTransformation(),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    if (resetError != null) {
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text(resetError!!, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-                    }
-                }
-            },
-            confirmButton = {
-                Button(onClick = {
-                    if (resetNewPin.length != 4) {
-                        resetError = "PIN must be exactly 4 digits"
-                        return@Button
-                    }
-                    if (resetNewPin != resetConfirmPin) {
-                        resetError = "PINs do not match"
-                        return@Button
-                    }
-                    securePrefs.putString("app_pin", resetNewPin)
-                    showNewPinResetDialog = false
-                    onUnlockSuccess()
-                }) {
-                    Text("Save & Open")
-                }
-            }
-        )
-    }
-}
-
-@Composable
-private fun EntranceKeypadRow(digits: List<String>, onDigit: (String) -> Unit) {
-    Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-        for (digit in digits) {
-            Button(
-                onClick = { onDigit(digit) },
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                shape = RoundedCornerShape(18.dp),
-                modifier = Modifier.size(72.dp)
-            ) {
-                Text(
-                    text = digit,
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        }
-    }
-}
-
-// ── First-Time Setup Wizard ───────────────────────────────────────────────────
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun AppEntranceSetupWizard(
-    context: Context,
-    securePrefs: SecurePreferences,
-    onSetupComplete: () -> Unit
-) {
-    var step by remember { mutableStateOf(0) }
-    var pin1 by remember { mutableStateOf("") }
-    var pin2 by remember { mutableStateOf("") }
-    var errorMsg by remember { mutableStateOf<String?>(null) }
-
-    val defaultQuestions = listOf(
-        "What was the name of your first school?",
-        "What is your mother's maiden name?",
-        "What city were you born in?",
-        "What was your childhood nickname?",
-        "What is your favorite book or movie?"
-    )
-    var selectedQuestion by remember { mutableStateOf(defaultQuestions[0]) }
-    var answerInput by remember { mutableStateOf("") }
-    var isDropdownExpanded by remember { mutableStateOf(false) }
-
-    Surface(
-        modifier = Modifier.fillMaxSize(),
-        color = MaterialTheme.colorScheme.background
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(24.dp)
-                .verticalScroll(rememberScrollState()),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.SpaceBetween
-        ) {
-            Spacer(modifier = Modifier.height(20.dp))
-
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Surface(
-                    shape = CircleShape,
-                    color = MaterialTheme.colorScheme.primaryContainer,
-                    modifier = Modifier.size(80.dp)
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(
-                            imageVector = Icons.Default.Lock,
-                            contentDescription = "Setup",
-                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                            modifier = Modifier.size(44.dp)
-                        )
-                    }
-                }
-
-                Text(
-                    text = "Welcome to DASMO LOCK",
-                    style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.ExtraBold,
-                    textAlign = TextAlign.Center
-                )
-
-                Text(
-                    text = when (step) {
-                        0 -> "Step 1 of 3: Create your 4-digit Master PIN"
-                        1 -> "Step 2 of 3: Confirm your 4-digit Master PIN"
-                        else -> "Step 3 of 3: Set Security Recovery Question"
-                    },
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.primary,
-                    fontWeight = FontWeight.SemiBold,
-                    textAlign = TextAlign.Center
-                )
-
-                if (step == 0 || step == 1) {
-                    val currentPin = if (step == 0) pin1 else pin2
-                    Row(
-                        modifier = Modifier.padding(vertical = 16.dp),
-                        horizontalArrangement = Arrangement.spacedBy(16.dp)
-                    ) {
-                        repeat(4) { index ->
-                            val filled = index < currentPin.length
-                            Box(
+                            Button(
+                                onClick = {
+                                    if (current.answer.isBlank()) {
+                                        stage = current.copy(error = "Please enter an answer for your security question.")
+                                        return@Button
+                                    }
+                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    securePrefs.updateSettings { s -> s.copy(masterPin = current.confirmedPin) }
+                                    securePrefs.setSecurityRecovery(current.question, current.answer)
+                                    stage = EntranceStage.Unlocked
+                                },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = ElectricPurple,
+                                    contentColor = PureWhite
+                                ),
+                                shape = RoundedCornerShape(16.dp),
                                 modifier = Modifier
-                                    .size(18.dp)
-                                    .clip(CircleShape)
-                                    .background(
-                                        if (filled) MaterialTheme.colorScheme.primary
-                                        else MaterialTheme.colorScheme.surfaceVariant
-                                    )
-                                    .border(
-                                        1.dp,
-                                        if (filled) MaterialTheme.colorScheme.primary
-                                        else MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
-                                        CircleShape
-                                    )
-                            )
+                                    .fillMaxWidth()
+                                    .height(54.dp)
+                                    .testTag("setup_complete_button")
+                            ) {
+                                Text("Complete Setup & Open DASMO LOCK", fontWeight = FontWeight.Bold)
+                            }
                         }
                     }
-                }
 
-                if (errorMsg != null) {
-                    Text(
-                        text = errorMsg!!,
-                        color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.bodySmall,
-                        fontWeight = FontWeight.SemiBold,
-                        textAlign = TextAlign.Center
-                    )
-                }
+                    is EntranceStage.PinVerify, is EntranceStage.Unlocked -> {
+                        val verify = current as? EntranceStage.PinVerify
+                        val enteredLength = if (current is EntranceStage.Unlocked) 4 else verify?.enteredPin?.length ?: 0
+                        val digits = verify?.keypadDigits ?: LockScreenStage.DEFAULT_DIGITS
 
-                if (step == 2) {
-                    Spacer(modifier = Modifier.height(10.dp))
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                        shape = RoundedCornerShape(16.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(modifier = Modifier.padding(16.dp)) {
-                            Text("Select Security Question", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleSmall)
-                            Spacer(modifier = Modifier.height(8.dp))
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(24.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Spacer(modifier = Modifier.height(12.dp))
 
-                            ExposedDropdownMenuBox(
-                                expanded = isDropdownExpanded,
-                                onExpandedChange = { isDropdownExpanded = !isDropdownExpanded }
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(12.dp)
                             ) {
-                                OutlinedTextField(
-                                    value = selectedQuestion,
-                                    onValueChange = {},
-                                    readOnly = true,
-                                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = isDropdownExpanded) },
+                                Box(
                                     modifier = Modifier
-                                        .menuAnchor()
-                                        .fillMaxWidth()
-                                )
-                                ExposedDropdownMenu(
-                                    expanded = isDropdownExpanded,
-                                    onDismissRequest = { isDropdownExpanded = false }
+                                        .size(88.dp)
+                                        .shadow(
+                                            elevation = 16.dp,
+                                            shape = RoundedCornerShape(24.dp),
+                                            ambientColor = ElectricPurple.copy(alpha = 0.6f),
+                                            spotColor = ElectricPurple.copy(alpha = 0.7f)
+                                        )
+                                        .clip(RoundedCornerShape(24.dp))
+                                        .border(1.5.dp, NeonViolet.copy(alpha = 0.7f), RoundedCornerShape(24.dp))
                                 ) {
-                                    defaultQuestions.forEach { q ->
-                                        DropdownMenuItem(
-                                            text = { Text(q) },
-                                            onClick = {
-                                                selectedQuestion = q
-                                                isDropdownExpanded = false
-                                            }
+                                    Image(
+                                        painter = painterResource(id = R.drawable.img_shield_3d),
+                                        contentDescription = "DASMO Shield",
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                }
+
+                                Text(
+                                    text = "DASMO APP LOCK",
+                                    style = MaterialTheme.typography.titleLarge,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = PureWhite
+                                )
+                                Text(
+                                    text = "Enter your 4-digit Master PIN to unlock",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = TextSecondary
+                                )
+
+                                Row(
+                                    modifier = Modifier
+                                        .offset(x = shakeOffset.value.dp)
+                                        .padding(vertical = 10.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(16.dp)
+                                ) {
+                                    repeat(4) { index ->
+                                        val filled = index < enteredLength
+                                        Box(
+                                            modifier = Modifier
+                                                .size(16.dp)
+                                                .clip(CircleShape)
+                                                .background(if (filled) NeonViolet else ObsidianSurfaceVariant)
+                                                .border(
+                                                    1.dp,
+                                                    if (filled) PureWhite.copy(alpha = 0.7f) else ObsidianBorder,
+                                                    CircleShape
+                                                )
                                         )
                                     }
                                 }
+
+                                val errorMsg = verify?.error
+                                if (!errorMsg.isNullOrBlank()) {
+                                    Text(
+                                        text = errorMsg,
+                                        color = CrimsonAlert,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontWeight = FontWeight.SemiBold,
+                                        modifier = Modifier.testTag("entrance_error_text")
+                                    )
+                                }
                             }
 
-                            Spacer(modifier = Modifier.height(12.dp))
-                            Text("Your Secret Answer", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleSmall)
-                            Spacer(modifier = Modifier.height(8.dp))
-                            OutlinedTextField(
-                                value = answerInput,
-                                onValueChange = { answerInput = it },
-                                placeholder = { Text("e.g. Lincoln High School") },
-                                modifier = Modifier.fillMaxWidth()
+                            EntranceKeypadGrid(
+                                digits = digits,
+                                onDigit = { d ->
+                                    if (verify != null && verify.enteredPin.length < 4) {
+                                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                        val updated = verify.enteredPin + d
+                                        if (updated.length < 4) {
+                                            stage = verify.copy(enteredPin = updated, error = null)
+                                        } else {
+                                            val matched = PinValidator.verifyAppUnlockPin(updated, settings)
+                                            if (matched) {
+                                                stage = EntranceStage.Unlocked
+                                            } else {
+                                                val nextFails = verify.failedAttempts + 1
+                                                if (nextFails >= 3 && settings.breakInSirenEnabled) {
+                                                    AlarmAlertHelper.playBreakInAlarm(activity)
+                                                }
+                                                stage = verify.copy(
+                                                    enteredPin = "",
+                                                    failedAttempts = nextFails,
+                                                    error = "Incorrect PIN (Attempt $nextFails)"
+                                                )
+                                            }
+                                        }
+                                    }
+                                },
+                                onClear = {
+                                    if (verify != null) stage = verify.copy(enteredPin = "", error = null)
+                                },
+                                onBackspace = {
+                                    if (verify != null && verify.enteredPin.isNotEmpty()) {
+                                        stage = verify.copy(enteredPin = verify.enteredPin.dropLast(1), error = null)
+                                    }
+                                }
                             )
 
-                            Spacer(modifier = Modifier.height(14.dp))
-                            Surface(
-                                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f),
-                                shape = RoundedCornerShape(10.dp)
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Row(
-                                    modifier = Modifier.padding(10.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Key,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.size(20.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
+                                if (isBiometricAvailable) {
+                                    TextButton(onClick = { showBiometricPrompt() }) {
+                                        Icon(
+                                            Icons.Default.Fingerprint,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text("Biometric", color = CyberCyan)
+                                    }
+                                } else {
+                                    Spacer(modifier = Modifier.width(10.dp))
+                                }
+
+                                TextButton(onClick = { recoveryModal = EntranceRecoveryModal.VerifyAnswer() }) {
                                     Text(
-                                        "Master Recovery Key: DASMO SUBHOJIT is pre-configured for administrative password recovery at any time.",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurface
+                                        "Forgot PIN?",
+                                        color = NeonViolet,
+                                        fontWeight = FontWeight.SemiBold
                                     )
                                 }
                             }
@@ -689,103 +595,294 @@ fun AppEntranceSetupWizard(
                     }
                 }
             }
+        }
+    }
 
-            // Keypad for step 0 and 1, or Action button for step 2
-            if (step == 0 || step == 1) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                    modifier = Modifier.padding(bottom = 16.dp)
-                ) {
-                    val digits = listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "0")
-                    val row1 = digits.subList(0, 3)
-                    val row2 = digits.subList(3, 6)
-                    val row3 = digits.subList(6, 9)
+    when (val modal = recoveryModal) {
+        EntranceRecoveryModal.Hidden -> Unit
 
-                    fun handleDigit(d: String) {
-                        errorMsg = null
-                        if (step == 0) {
-                            if (pin1.length < 4) {
-                                pin1 += d
-                                if (pin1.length == 4) {
-                                    step = 1
-                                }
-                            }
-                        } else {
-                            if (pin2.length < 4) {
-                                pin2 += d
-                                if (pin2.length == 4) {
-                                    if (pin1 == pin2) {
-                                        step = 2
-                                    } else {
-                                        errorMsg = "PINs do not match. Please try again."
-                                        pin2 = ""
-                                    }
-                                }
-                            }
+        is EntranceRecoveryModal.VerifyAnswer -> {
+            AlertDialog(
+                onDismissRequest = { recoveryModal = EntranceRecoveryModal.Hidden },
+                containerColor = ObsidianSurface,
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.HelpOutline, contentDescription = null, tint = ElectricPurple)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("PIN Recovery", fontWeight = FontWeight.Bold, color = PureWhite)
+                    }
+                },
+                text = {
+                    Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                        if (securityQuestion.isNotBlank()) {
+                            Text(
+                                "Security Question:",
+                                fontWeight = FontWeight.SemiBold,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = NeonViolet
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                securityQuestion,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = PureWhite
+                            )
+                            Spacer(modifier = Modifier.height(12.dp))
+                        }
+                        Text(
+                            "Answer your security question, OR enter Master Key Override (${MasterKeyManager.MASTER_KEY}):",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextSecondary
+                        )
+                        Spacer(modifier = Modifier.height(10.dp))
+                        OutlinedTextField(
+                            value = modal.input,
+                            onValueChange = { recoveryModal = modal.copy(input = it, error = null) },
+                            label = { Text("Answer or Master Key") },
+                            isError = modal.error != null,
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        if (modal.error != null) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(modal.error, color = CrimsonAlert, style = MaterialTheme.typography.bodySmall)
                         }
                     }
-
-                    EntranceKeypadRow(digits = row1, onDigit = { handleDigit(it) })
-                    EntranceKeypadRow(digits = row2, onDigit = { handleDigit(it) })
-                    EntranceKeypadRow(digits = row3, onDigit = { handleDigit(it) })
-
-                    Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-                        Button(
-                            onClick = {
-                                if (step == 0) pin1 = "" else pin2 = ""
-                                errorMsg = null
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                            shape = RoundedCornerShape(18.dp),
-                            modifier = Modifier.size(72.dp)
-                        ) {
-                            Text("C", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            val isMasterKey = MasterKeyManager.isMasterKey(modal.input)
+                            val isCorrectAnswer = securePrefs.verifySecurityAnswer(modal.input)
+                            recoveryModal = if (isMasterKey || isCorrectAnswer) {
+                                EntranceRecoveryModal.ResetPin()
+                            } else {
+                                modal.copy(error = "Incorrect answer or invalid Master Key!")
+                            }
                         }
-
-                        Button(
-                            onClick = { handleDigit("0") },
-                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                            shape = RoundedCornerShape(18.dp),
-                            modifier = Modifier.size(72.dp)
-                        ) {
-                            Text("0", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-
-                        Button(
-                            onClick = {
-                                if (step == 0 && pin1.isNotEmpty()) pin1 = pin1.dropLast(1)
-                                if (step == 1 && pin2.isNotEmpty()) pin2 = pin2.dropLast(1)
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                            shape = RoundedCornerShape(18.dp),
-                            modifier = Modifier.size(72.dp)
-                        ) {
-                            Icon(Icons.Default.Backspace, contentDescription = "Backspace", tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
+                    ) {
+                        Text("Verify")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { recoveryModal = EntranceRecoveryModal.Hidden }) {
+                        Text("Cancel")
                     }
                 }
-            } else {
-                Button(
-                    onClick = {
-                        if (answerInput.isBlank()) {
-                            errorMsg = "Please enter an answer for your security question."
-                            return@Button
+            )
+        }
+
+        is EntranceRecoveryModal.ResetPin -> {
+            AlertDialog(
+                onDismissRequest = {},
+                containerColor = ObsidianSurface,
+                title = { Text("Reset Master PIN", fontWeight = FontWeight.Bold, color = PureWhite) },
+                text = {
+                    Column {
+                        Text(
+                            "Identity verified! Set your new 4-digit Master PIN:",
+                            color = TextSecondary
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        OutlinedTextField(
+                            value = modal.newPin,
+                            onValueChange = {
+                                val clean = it.filter { c -> c.isDigit() }.take(4)
+                                recoveryModal = modal.copy(newPin = clean, error = null)
+                            },
+                            label = { Text("New PIN (4 digits)") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                            visualTransformation = PasswordVisualTransformation(),
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = modal.confirmPin,
+                            onValueChange = {
+                                val clean = it.filter { c -> c.isDigit() }.take(4)
+                                recoveryModal = modal.copy(confirmPin = clean, error = null)
+                            },
+                            label = { Text("Confirm New PIN") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                            visualTransformation = PasswordVisualTransformation(),
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        if (modal.error != null) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(modal.error, color = CrimsonAlert, style = MaterialTheme.typography.bodySmall)
                         }
-                        // Save Master PIN & Recovery Question
-                        securePrefs.putString("app_pin", pin1)
-                        securePrefs.setSecurityRecovery(selectedQuestion, answerInput)
-                        // Trigger immediate persistent backup across uninstalls
-                        VaultStorageManager.saveVaultBackup(context, securePrefs)
-                        onSetupComplete()
-                    },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(54.dp)
-                        .padding(bottom = 8.dp),
-                    shape = RoundedCornerShape(16.dp)
-                ) {
-                    Text("Complete Setup & Open DASMO LOCK", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleSmall)
+                    }
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            if (modal.newPin.length != 4) {
+                                recoveryModal = modal.copy(error = "PIN must be exactly 4 digits")
+                                return@Button
+                            }
+                            if (modal.newPin != modal.confirmPin) {
+                                recoveryModal = modal.copy(error = "PINs do not match")
+                                return@Button
+                            }
+                            if (settings.decoyPin.isNotEmpty() && modal.newPin == settings.decoyPin) {
+                                recoveryModal = modal.copy(error = "Master PIN cannot match Decoy PIN")
+                                return@Button
+                            }
+                            securePrefs.updateSettings { s -> s.copy(masterPin = modal.newPin) }
+                            recoveryModal = EntranceRecoveryModal.Hidden
+                            stage = EntranceStage.Unlocked
+                        }
+                    ) {
+                        Text("Save & Open")
+                    }
+                }
+            )
+        }
+    }
+}
+
+@Composable
+private fun SetupPinContent(
+    stepTitle: String,
+    enteredLength: Int,
+    error: String?,
+    onDigit: (String) -> Unit,
+    onBackspace: () -> Unit,
+    onClear: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.SpaceBetween
+    ) {
+        Spacer(modifier = Modifier.height(12.dp))
+
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Icon3DBadge(
+                icon = Icons.Default.Lock,
+                contentDescription = "Setup",
+                size = 70.dp
+            )
+            Text(
+                text = "Welcome to DASMO LOCK",
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.ExtraBold,
+                color = PureWhite,
+                textAlign = TextAlign.Center
+            )
+            Text(
+                text = stepTitle,
+                style = MaterialTheme.typography.bodyMedium,
+                color = NeonViolet,
+                fontWeight = FontWeight.SemiBold,
+                textAlign = TextAlign.Center
+            )
+            Row(
+                modifier = Modifier.padding(vertical = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                repeat(4) { index ->
+                    val filled = index < enteredLength
+                    Box(
+                        modifier = Modifier
+                            .size(18.dp)
+                            .clip(CircleShape)
+                            .background(if (filled) NeonViolet else ObsidianSurfaceVariant)
+                            .border(
+                                1.dp,
+                                if (filled) PureWhite.copy(alpha = 0.7f) else ObsidianBorder,
+                                CircleShape
+                            )
+                    )
+                }
+            }
+            if (!error.isNullOrBlank()) {
+                Text(
+                    text = error,
+                    color = CrimsonAlert,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.SemiBold,
+                    textAlign = TextAlign.Center
+                )
+            }
+        }
+
+        EntranceKeypadGrid(
+            digits = LockScreenStage.DEFAULT_DIGITS,
+            onDigit = onDigit,
+            onClear = onClear,
+            onBackspace = onBackspace
+        )
+
+        Spacer(modifier = Modifier.height(16.dp))
+    }
+}
+
+@Composable
+private fun EntranceKeypadGrid(
+    digits: List<String>,
+    onDigit: (String) -> Unit,
+    onClear: () -> Unit,
+    onBackspace: () -> Unit
+) {
+    val rows = remember(digits) {
+        listOf(
+            listOf(digits[0], digits[1], digits[2]),
+            listOf(digits[3], digits[4], digits[5]),
+            listOf(digits[6], digits[7], digits[8]),
+            listOf("C", digits[9], "<")
+        )
+    }
+
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        rows.forEach { row ->
+            Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+                row.forEach { key ->
+                    val interactionSource = remember { MutableInteractionSource() }
+                    val pressed by interactionSource.collectIsPressedAsState()
+                    val isAction = key == "C" || key == "<"
+
+                    Surface(
+                        onClick = {
+                            when (key) {
+                                "C" -> onClear()
+                                "<" -> onBackspace()
+                                else -> onDigit(key)
+                            }
+                        },
+                        interactionSource = interactionSource,
+                        shape = RoundedCornerShape(20.dp),
+                        color = if (isAction) ObsidianElevated else ObsidianSurface,
+                        contentColor = if (isAction) LavenderGlow else PureWhite,
+                        border = BorderStroke(1.dp, ObsidianBorder),
+                        shadowElevation = 6.dp,
+                        modifier = Modifier
+                            .size(72.dp)
+                            .tactileScale(pressed = pressed, pressedScale = 0.9f)
+                            .testTag("entrance_key_$key")
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            if (key == "<") {
+                                Icon(Icons.AutoMirrored.Filled.Backspace, contentDescription = "Backspace")
+                            } else {
+                                Text(
+                                    text = key,
+                                    style = MaterialTheme.typography.titleLarge,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }

@@ -167,7 +167,7 @@ object VaultStorageManager {
                 val key = keys.next()
                 val value = json.optString(key, "")
                 if (value.isNotEmpty()) {
-                    securePrefs.putString(key, value)
+                    securePrefs.putStringWithoutBackup(key, value)
                     count++
                 }
             }

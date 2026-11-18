@@ -1,6 +1,10 @@
 {
   "name": "DASMO LOCK",
-  "description": "Privacy-first app locker with AES-256 vault and intruder detection.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "description": "Premium Android App Locker with Biometric & PIN Security, Dynamic Time PIN, Anti-Peep Scrambled Keypad, Intruder Selfie Camera, AES-256 Encrypted Vault, Decoy Panic Mode, and Calculator Camouflage.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

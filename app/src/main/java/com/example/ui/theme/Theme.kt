@@ -35,8 +35,8 @@ private val PurpleBlackColorScheme = darkColorScheme(
 
 @Composable
 fun MyApplicationTheme(
-    darkTheme: Boolean = true, // Force sleek luxury dark purple aesthetic requested by user
-    dynamicColor: Boolean = false, // Keep consistent purple & black branding
+    darkTheme: Boolean = true,
+    dynamicColor: Boolean = false,
     content: @Composable () -> Unit,
 ) {
     MaterialTheme(

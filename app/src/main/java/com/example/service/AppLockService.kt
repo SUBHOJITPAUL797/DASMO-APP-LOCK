@@ -5,14 +5,20 @@ import android.app.NotificationManager
 import android.app.Service
 import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.os.Build
 import android.os.IBinder
+import android.provider.Settings
 import androidx.core.app.NotificationCompat
+import com.example.R
 import com.example.data.db.AppGuardDatabase
+import com.example.domain.model.SecuritySettings
 import com.example.domain.repository.AppLockRepository
 import com.example.presentation.screens.lock.LockActivity
+import com.example.util.SecurePreferences
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -24,14 +30,44 @@ class AppLockService : Service() {
 
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private lateinit var repository: AppLockRepository
-    private var cachedLockedPackages = mapOf<String, String>()
+    private lateinit var securePrefs: SecurePreferences
+    private lateinit var tracker: LockSessionTracker
+
+    @Volatile
+    private var cachedLockedPackages: Map<String, String> = emptyMap()
+
+    @Volatile
+    private var currentSettings: SecuritySettings = SecuritySettings()
+
+    @Volatile
     private var isRunning = false
 
+    private val screenOffReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == Intent.ACTION_SCREEN_OFF) {
+                tracker.onScreenOff()
+            }
+        }
+    }
+
     companion object {
-        val unlockedApps = mutableSetOf<String>()
-        val lastBackgroundTime = mutableMapOf<String, Long>()
-        var sessionDurationMillis: Long = 5 * 60 * 1000L // Default: 5 minutes
-        var currentForegroundPackage: String? = null
+        val unlockedApps: MutableSet<String> = LockSessionTracker("com.example").unlockedApps
+        val lastBackgroundTime: MutableMap<String, Long> = LockSessionTracker("com.example").lastBackgroundTime
+
+        @Volatile
+        private var activeTracker: LockSessionTracker? = null
+
+        fun markAppUnlocked(packageName: String) {
+            unlockedApps.add(packageName)
+            lastBackgroundTime.remove(packageName)
+            activeTracker?.markAppUnlocked(packageName)
+        }
+
+        fun clearUnlockedSessions() {
+            unlockedApps.clear()
+            lastBackgroundTime.clear()
+            activeTracker?.onScreenOff()
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -40,10 +76,26 @@ class AppLockService : Service() {
         super.onCreate()
         val dao = AppGuardDatabase.getDatabase(this).appLockDao()
         repository = AppLockRepository(dao)
+        securePrefs = SecurePreferences.getInstance(this)
+        currentSettings = securePrefs.currentSettings()
+        tracker = LockSessionTracker(
+            ownPackageName = packageName,
+            unlockedApps = unlockedApps,
+            lastBackgroundTime = lastBackgroundTime
+        )
+        activeTracker = tracker
+
+        registerReceiver(screenOffReceiver, IntentFilter(Intent.ACTION_SCREEN_OFF))
 
         serviceScope.launch {
-            repository.activeLockedApps.collect { apps ->
-                cachedLockedPackages = apps.associate { it.packageName to it.appLabel }
+            repository.allLockedApps.collect { apps ->
+                cachedLockedPackages = apps.filter { it.isLocked }.associate { it.packageName to it.appLabel }
+            }
+        }
+
+        serviceScope.launch {
+            securePrefs.settingsFlow.collect { updated ->
+                currentSettings = updated
             }
         }
     }
@@ -51,23 +103,27 @@ class AppLockService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         createNotificationChannel()
         val notification = NotificationCompat.Builder(this, "app_lock_channel")
-            .setContentTitle("App Lock Active")
-            .setContentText("Protecting your apps")
-            .setSmallIcon(android.R.drawable.ic_secure)
+            .setContentTitle("DASMO LOCK Active")
+            .setContentText("Shielding locked apps in real time")
+            .setSmallIcon(R.drawable.ic_lock_notification)
             .setOngoing(true)
             .build()
-            
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(1, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+            startForeground(
+                1,
+                notification,
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            )
         } else {
             startForeground(1, notification)
         }
-        
+
         if (!isRunning) {
             isRunning = true
             startMonitoring()
         }
-        
+
         return START_STICKY
     }
 
@@ -78,7 +134,7 @@ class AppLockService : Service() {
                 "App Lock Service",
                 NotificationManager.IMPORTANCE_LOW
             )
-            channel.description = "Used for App Lock monitoring"
+            channel.description = "Used for DASMO LOCK foreground monitoring"
             val manager = getSystemService(NotificationManager::class.java)
             manager.createNotificationChannel(channel)
         }
@@ -89,85 +145,44 @@ class AppLockService : Service() {
         serviceScope.launch {
             while (isRunning) {
                 val endTime = System.currentTimeMillis()
-                val beginTime = endTime - 1000 * 5 // last 5 seconds
+                val beginTime = endTime - 5_000L
                 val events = usageStatsManager.queryEvents(beginTime, endTime)
                 val event = UsageEvents.Event()
-                var latestPackage = currentForegroundPackage
-                
+                var latestPackage = tracker.currentForegroundPackage
+
                 while (events.hasNextEvent()) {
                     events.getNextEvent(event)
                     if (event.eventType == UsageEvents.Event.ACTIVITY_RESUMED) {
                         latestPackage = event.packageName
                     }
                 }
-                
-                if (latestPackage != null && latestPackage != currentForegroundPackage) {
-                    onAppForegrounded(latestPackage)
+
+                if (latestPackage != null && latestPackage != tracker.currentForegroundPackage) {
+                    val action = tracker.onForegroundAppChanged(
+                        targetPackageName = latestPackage,
+                        lockedPackages = cachedLockedPackages.keys,
+                        settings = currentSettings,
+                        nowMillis = System.currentTimeMillis()
+                    )
+                    if (action is ForegroundAction.RequireLock && Settings.canDrawOverlays(this@AppLockService)) {
+                        val label = resolveAppLabel(action.packageName, action.isUninstallProtection)
+                        launchLockScreen(action.packageName, label, action.isHidden)
+                    }
                 }
-                
-                delay(500) // Poll every 500ms
+
+                delay(350)
             }
         }
     }
 
-    private fun onAppForegrounded(targetPackageName: String) {
-        if (targetPackageName == packageName) {
-            currentForegroundPackage = targetPackageName
-            return
+    private fun resolveAppLabel(targetPackageName: String, isUninstallProtection: Boolean): String {
+        if (isUninstallProtection) return "Uninstall Protection"
+        return cachedLockedPackages[targetPackageName] ?: try {
+            val info = packageManager.getApplicationInfo(targetPackageName, 0)
+            packageManager.getApplicationLabel(info).toString()
+        } catch (_: Exception) {
+            targetPackageName
         }
-
-        if (currentForegroundPackage != targetPackageName && currentForegroundPackage != null) {
-            if (currentForegroundPackage != packageName) {
-                lastBackgroundTime[currentForegroundPackage!!] = System.currentTimeMillis()
-            }
-        }
-        currentForegroundPackage = targetPackageName
-
-        val securePrefs = com.example.util.SecurePreferences(this)
-        val isUninstallProtection = securePrefs.getString("uninstall_protection", "false") == "true"
-        val isPackageInstaller = isUninstallProtection && isPackageInstallerApp(targetPackageName)
-
-        val hiddenAppsStr = securePrefs.getString("hidden_apps", "") ?: ""
-        val hiddenApps = hiddenAppsStr.split(",").filter { it.isNotEmpty() }.toSet()
-        val isHidden = hiddenApps.contains(targetPackageName)
-        val isLocked = cachedLockedPackages.containsKey(targetPackageName)
-
-        if (isLocked || isHidden || isPackageInstaller) {
-            val appLabel = if (isPackageInstaller) {
-                "Uninstall Protection"
-            } else {
-                cachedLockedPackages[targetPackageName] ?: try {
-                    val pm = packageManager
-                    val info = pm.getApplicationInfo(targetPackageName, 0)
-                    pm.getApplicationLabel(info).toString()
-                } catch (e: Exception) {
-                    targetPackageName
-                }
-            }
-
-            val isUnlocked = unlockedApps.contains(targetPackageName)
-            val bgTime = lastBackgroundTime[targetPackageName]
-            val timeInBackground = if (bgTime != null) System.currentTimeMillis() - bgTime else 0L
-
-            val currentTimeout = securePrefs.getString("auto_lock_timeout", "300000").toLongOrNull() ?: sessionDurationMillis
-
-            if (!isUnlocked || timeInBackground > currentTimeout) {
-                unlockedApps.remove(targetPackageName)
-                launchLockScreen(targetPackageName, appLabel, isHidden)
-            }
-        }
-    }
-
-    private fun isPackageInstallerApp(pkg: String): Boolean {
-        val low = pkg.lowercase()
-        return low == "com.android.packageinstaller" ||
-               low == "com.google.android.packageinstaller" ||
-               low == "com.samsung.android.packageinstaller" ||
-               low == "com.miui.packageinstaller" ||
-               low == "com.coloros.packageinstaller" ||
-               low == "com.oppo.packageinstaller" ||
-               low == "com.vivo.packageinstaller" ||
-               low == "com.sec.android.app.samsungapps"
     }
 
     private fun launchLockScreen(targetPackage: String, appLabel: String, isHidden: Boolean) {
@@ -175,7 +190,9 @@ class AppLockService : Service() {
             putExtra("TARGET_PACKAGE", targetPackage)
             putExtra("APP_LABEL", appLabel)
             putExtra("IS_HIDDEN", isHidden)
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                Intent.FLAG_ACTIVITY_SINGLE_TOP
         }
         startActivity(intent)
     }
@@ -183,6 +200,11 @@ class AppLockService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         isRunning = false
+        activeTracker = null
+        try {
+            unregisterReceiver(screenOffReceiver)
+        } catch (_: Exception) {
+        }
         serviceScope.cancel()
     }
 }
