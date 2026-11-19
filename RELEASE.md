@@ -13,14 +13,14 @@
 
 ---
 
-## 📋 GitHub Release Notes (v1.0.8)
+## 📋 GitHub Release Notes (v1.0.9)
 
 ```markdown
-# 🛡️ DASMO Lock v1.0.8 — Advanced Architecture, Security Database & UI State Machine Overhaul
+# 🛡️ DASMO Lock v1.0.9 — Multi-Method Authentication, Reinstall Persistence & Vault Integrity Overhaul
 
 ### 🏷️ Metadata
-- **Version:** `v1.0.8`
-- **versionCode:** `9`
+- **Version:** `v1.0.9`
+- **versionCode:** `10`
 - **Package:** `dasmo.lock.subhojit`
 - **Channel:** Production (Stable)
 - **Minimum OS:** Android 7.0 (API Level 24)
@@ -31,17 +31,18 @@
 
 ### 🚀 Highlights & What's New
 
-- **🗄️ Enhanced Database Architecture & Security Models:**
-  - Integrated Room database structure (`AppGuardDatabase`, `AppLockDao`, `LockedAppEntity`) for persistent app lock rules and state caching.
-  - Added centralized security models (`SecurityModels.kt`) ensuring type safety across app lock, vault, and disguise subsystems.
-- **🔢 Calculator Disguise State Machine:**
-  - Upgraded Calculator Disguise screen with dedicated state machine (`CalculatorStateMachine.kt`) for robust vault access without UI flicker.
-- **🔐 Lock Screen State Machine & Session Tracking:**
-  - Modernized lock activity lifecycle (`LockStateMachine.kt`, `LockSessionTracker.kt`, `AppEntranceLockScreen.kt`) with smoother biometric, pattern, and PIN verification.
-- **🖼️ Vault Media Viewers & Storage Improvements:**
-  - Dedicated full-screen vault media viewer components (`VaultMediaViewers.kt`, `VaultStorage.kt`) supporting high-resolution image zoom and video playback.
-- **⚙️ Dedicated Settings Dashboard:**
-  - Integrated comprehensive settings architecture (`SettingsScreen.kt`, `SettingsState.kt`) with tactile haptic components.
+- **🔐 Multi-Method Authentication (Pattern, Password, PIN):**
+  - Added full support for flexible authentication types including custom dot patterns, text passwords, and numeric PINs in security settings and lock screens.
+  - Interactive tactile `PatternLockView` with smooth gestures, dynamic animations, and real-time validation.
+- **🔄 Re-install & Update Persistence:**
+  - Enhanced Room persistence layer in `AppLockDao` so locked application configurations survive app updates and re-installation.
+  - Added `MY_PACKAGE_REPLACED` intent receiver in `BootReceiver` ensuring immediate service startup and security enforcement right after an OTA update.
+- **🖼️ Vault Media Cleaning & Gallery De-indexing:**
+  - Upgraded media scanner and gallery cleaner logic in `VaultMediaCleaner` to promptly purge encrypted media files from device gallery and external media stores.
+- **⚙️ Redesigned Settings & Update Tabs:**
+  - Modernized settings architecture with dedicated tabs (`SettingsTabContents.kt`, `SettingsUpdatesTab.kt`) for granular app protection and in-app update management.
+- **🧪 Comprehensive Test Coverage:**
+  - Expanded unit and Robolectric UI test suites covering multi-method security workflows, biometric fallbacks, and encryption models.
 
 ---
 
@@ -49,16 +50,16 @@
 
 | File | Type | Target Architecture | Size | Checksum (SHA-256) |
 | :--- | :--- | :--- | :--- | :--- |
-| [`dasmo-lock-v1.0.8.apk`](https://github.com/SUBHOJITPAUL797/DASMO-APP-LOCK/releases/download/v1.0.8/dasmo-lock-v1.0.8.apk) | Production APK | Universal (arm64-v8a, armeabi-v7a, x86_64) | 20.78 MB | `85bee7fd5d15fbbe48c9e44b4ea3a88f24b22a66de02f076693a2427f9e2b4b8` |
+| [`dasmo-lock-v1.0.9.apk`](https://github.com/SUBHOJITPAUL797/DASMO-APP-LOCK/releases/download/v1.0.9/dasmo-lock-v1.0.9.apk) | Production APK | Universal (arm64-v8a, armeabi-v7a, x86_64) | 20.87 MB | `0A12332193435C5DE159FFCE8A217A498C5A1612E7E2D520CA8839B26F1D6DA9` |
 ```
 
 ---
 
-## 🚀 Current Production Release: v1.0.8
+## 🚀 Current Production Release: v1.0.9
 
 ### Version Summary
-- **Tag:** `v1.0.8`
-- **Version Code:** `9`
-- **Version Name:** `1.0.8`
+- **Tag:** `v1.0.9`
+- **Version Code:** `10`
+- **Version Name:** `1.0.9`
 - **Status:** General Availability (GA)
 - **Repository:** `SUBHOJITPAUL797/DASMO-APP-LOCK`
