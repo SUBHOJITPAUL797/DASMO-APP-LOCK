@@ -116,6 +116,9 @@ object VaultStorageManager {
             val json = JSONObject()
             val keysToBackup = listOf(
                 "app_pin",
+                "unlock_method",
+                "app_pattern",
+                "app_password",
                 "security_question",
                 "security_answer",
                 "decoy_pin",
@@ -125,13 +128,17 @@ object VaultStorageManager {
                 "dynamic_time_pin",
                 "scramble_keypad",
                 "break_in_siren",
-                "prevent_screenshots"
+                "prevent_screenshots",
+                "hidden_apps",
+                "locked_apps_backup"
             )
 
             for (key in keysToBackup) {
-                val value = securePrefs.getString(key, "")
-                if (value.isNotEmpty()) {
-                    json.put(key, value)
+                if (securePrefs.contains(key)) {
+                    val value = securePrefs.getString(key, "")
+                    if (value.isNotEmpty() || key == "hidden_apps" || key == "locked_apps_backup") {
+                        json.put(key, value)
+                    }
                 }
             }
 
@@ -148,7 +155,26 @@ object VaultStorageManager {
     }
 
     /**
-     * Restores PINs, security recovery, and settings from persistent backup if available.
+     * Reads a single backed-up key from the encrypted persistent backup file without overwriting
+     * any other preferences. Useful for restoring locked apps after an app update if Room was cleared.
+     */
+    fun readBackedUpKey(context: Context, key: String): String {
+        return try {
+            val vaultDir = getVaultDirectory(context, false)
+            val configFile = File(vaultDir, CONFIG_BACKUP_NAME)
+            if (!configFile.exists() || configFile.length() == 0L) return ""
+            val encryptedContent = configFile.readText(Charsets.UTF_8)
+            val decryptedJsonStr = CryptoManager.decrypt(encryptedContent)
+            val json = JSONObject(decryptedJsonStr)
+            json.optString(key, "")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to read backed up key: $key", e)
+            ""
+        }
+    }
+
+    /**
+     * Restores PINs, security recovery, locked apps, and settings from persistent backup if available.
      * Returns true if backup was found and restored.
      */
     fun restoreVaultBackup(context: Context, securePrefs: SecurePreferences): Boolean {
@@ -166,7 +192,7 @@ object VaultStorageManager {
             while (keys.hasNext()) {
                 val key = keys.next()
                 val value = json.optString(key, "")
-                if (value.isNotEmpty()) {
+                if (value.isNotEmpty() || key == "hidden_apps" || key == "locked_apps_backup") {
                     securePrefs.putStringWithoutBackup(key, value)
                     count++
                 }

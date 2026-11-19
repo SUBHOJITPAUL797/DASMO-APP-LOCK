@@ -1,13 +1,16 @@
 package com.example.presentation.screens.lock
 
+import com.example.domain.model.PatternValidator
 import com.example.domain.model.PinValidator
 import com.example.domain.model.SecuritySettings
+import com.example.domain.model.UnlockMethod
 import java.util.Date
 
 data class LockTarget(
     val packageName: String,
     val appLabel: String,
-    val isHidden: Boolean
+    val isHidden: Boolean,
+    val instanceNonce: Long = 0L
 )
 
 enum class BiometricAuthState {
@@ -27,7 +30,40 @@ sealed interface LockScreenStage {
         val keypadDigits: List<String> = DEFAULT_DIGITS
     ) : LockScreenStage
 
+    data class PatternAuthentication(
+        val failedAttempts: Int = 0,
+        val errorMessage: String? = null,
+        val biometricState: BiometricAuthState = BiometricAuthState.IDLE
+    ) : LockScreenStage
+
+    data class PasswordAuthentication(
+        val enteredPassword: String = "",
+        val passwordVisible: Boolean = false,
+        val failedAttempts: Int = 0,
+        val errorMessage: String? = null,
+        val biometricState: BiometricAuthState = BiometricAuthState.IDLE
+    ) : LockScreenStage
+
     data object Unlocked : LockScreenStage
+
+    val currentFailedAttempts: Int
+        get() = when (this) {
+            is PinAuthentication -> failedAttempts
+            is PatternAuthentication -> failedAttempts
+            is PasswordAuthentication -> failedAttempts
+            else -> 0
+        }
+
+    val currentErrorMessage: String?
+        get() = when (this) {
+            is PinAuthentication -> errorMessage
+            is PatternAuthentication -> errorMessage
+            is PasswordAuthentication -> errorMessage
+            else -> null
+        }
+
+    val isAuthInputStage: Boolean
+        get() = this is PinAuthentication || this is PatternAuthentication || this is PasswordAuthentication
 
     companion object {
         val DEFAULT_DIGITS = listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "0")
@@ -43,11 +79,34 @@ sealed interface LockScreenStage {
             )
         }
 
+        fun createAuthStage(
+            settings: SecuritySettings,
+            biometricState: BiometricAuthState = BiometricAuthState.IDLE
+        ): LockScreenStage {
+            return when (settings.unlockMethod) {
+                UnlockMethod.PIN -> createPinStage(settings.scrambleKeypadEnabled, biometricState)
+                UnlockMethod.PATTERN -> {
+                    if (PatternValidator.isValidEncodedPattern(settings.masterPattern)) {
+                        PatternAuthentication(biometricState = biometricState)
+                    } else {
+                        createPinStage(settings.scrambleKeypadEnabled, biometricState)
+                    }
+                }
+                UnlockMethod.PASSWORD -> {
+                    if (settings.masterPassword.isNotBlank()) {
+                        PasswordAuthentication(biometricState = biometricState)
+                    } else {
+                        createPinStage(settings.scrambleKeypadEnabled, biometricState)
+                    }
+                }
+            }
+        }
+
         fun initialFor(target: LockTarget, settings: SecuritySettings): LockScreenStage {
             return if (target.isHidden) {
                 FakeCrashDecoy
             } else {
-                createPinStage(settings.scrambleKeypadEnabled)
+                createAuthStage(settings)
             }
         }
     }
@@ -66,7 +125,7 @@ data class LockTransitionResult(
 
 object LockStateMachine {
     fun revealPinFromCrashDecoy(settings: SecuritySettings): LockScreenStage {
-        return LockScreenStage.createPinStage(settings.scrambleKeypadEnabled)
+        return LockScreenStage.createAuthStage(settings)
     }
 
     fun onDigitPressed(
@@ -93,19 +152,13 @@ object LockStateMachine {
             )
         } else {
             val nextFailedCount = stage.failedAttempts + 1
-            val effects = buildList {
-                add(LockEffect.TriggerIntruderCapture)
-                if (nextFailedCount >= 3 && settings.breakInSirenEnabled) {
-                    add(LockEffect.TriggerBreakInSiren)
-                }
-            }
             LockTransitionResult(
                 stage = stage.copy(
                     enteredPin = "",
                     failedAttempts = nextFailedCount,
                     errorMessage = "Incorrect PIN (Attempt $nextFailedCount)"
                 ),
-                effects = effects
+                effects = buildFailureEffects(nextFailedCount, settings)
             )
         }
     }
@@ -116,25 +169,114 @@ object LockStateMachine {
         return stage.copy(enteredPin = stage.enteredPin.dropLast(1), errorMessage = null)
     }
 
+    fun onPatternStarted(stage: LockScreenStage): LockScreenStage {
+        return if (stage is LockScreenStage.PatternAuthentication && stage.errorMessage != null) {
+            stage.copy(errorMessage = null)
+        } else {
+            stage
+        }
+    }
+
+    fun onPatternCompleted(
+        stage: LockScreenStage,
+        nodes: List<Int>,
+        settings: SecuritySettings
+    ): LockTransitionResult {
+        if (stage !is LockScreenStage.PatternAuthentication) return LockTransitionResult(stage)
+        if (!PatternValidator.isValidPattern(nodes)) {
+            return LockTransitionResult(
+                stage = stage.copy(errorMessage = "Connect at least ${PatternValidator.MIN_NODES} dots")
+            )
+        }
+        return if (PinValidator.verifyAppUnlockPattern(nodes, settings)) {
+            LockTransitionResult(
+                stage = LockScreenStage.Unlocked,
+                effects = listOf(LockEffect.UnlockGranted)
+            )
+        } else {
+            val nextFailedCount = stage.failedAttempts + 1
+            LockTransitionResult(
+                stage = stage.copy(
+                    failedAttempts = nextFailedCount,
+                    errorMessage = "Incorrect Pattern (Attempt $nextFailedCount)"
+                ),
+                effects = buildFailureEffects(nextFailedCount, settings)
+            )
+        }
+    }
+
+    fun onPasswordChanged(stage: LockScreenStage, newValue: String): LockScreenStage {
+        if (stage !is LockScreenStage.PasswordAuthentication) return stage
+        return stage.copy(enteredPassword = newValue.take(32), errorMessage = null)
+    }
+
+    fun onTogglePasswordVisibility(stage: LockScreenStage): LockScreenStage {
+        if (stage !is LockScreenStage.PasswordAuthentication) return stage
+        return stage.copy(passwordVisible = !stage.passwordVisible)
+    }
+
+    fun onPasswordSubmitted(
+        stage: LockScreenStage,
+        settings: SecuritySettings
+    ): LockTransitionResult {
+        if (stage !is LockScreenStage.PasswordAuthentication) return LockTransitionResult(stage)
+        if (stage.enteredPassword.isBlank()) {
+            return LockTransitionResult(
+                stage = stage.copy(errorMessage = "Enter your password to unlock")
+            )
+        }
+        return if (PinValidator.verifyAppUnlockPassword(stage.enteredPassword, settings)) {
+            LockTransitionResult(
+                stage = LockScreenStage.Unlocked,
+                effects = listOf(LockEffect.UnlockGranted)
+            )
+        } else {
+            val nextFailedCount = stage.failedAttempts + 1
+            LockTransitionResult(
+                stage = stage.copy(
+                    enteredPassword = "",
+                    failedAttempts = nextFailedCount,
+                    errorMessage = "Incorrect Password (Attempt $nextFailedCount)"
+                ),
+                effects = buildFailureEffects(nextFailedCount, settings)
+            )
+        }
+    }
+
     fun onBiometricFailed(
         stage: LockScreenStage,
         settings: SecuritySettings
     ): LockTransitionResult {
-        if (stage !is LockScreenStage.PinAuthentication) return LockTransitionResult(stage)
-        val nextFailed = stage.failedAttempts + 1
-        val effects = buildList {
-            add(LockEffect.TriggerIntruderCapture)
-            if (nextFailed >= 3 && settings.breakInSirenEnabled) {
-                add(LockEffect.TriggerBreakInSiren)
-            }
-        }
-        return LockTransitionResult(
-            stage = stage.copy(
+        if (!stage.isAuthInputStage) return LockTransitionResult(stage)
+        val nextFailed = stage.currentFailedAttempts + 1
+        val effects = buildFailureEffects(nextFailed, settings)
+        val nextStage = when (stage) {
+            is LockScreenStage.PinAuthentication -> stage.copy(
                 failedAttempts = nextFailed,
                 errorMessage = "Biometric authentication failed",
                 biometricState = BiometricAuthState.IDLE
-            ),
-            effects = effects
-        )
+            )
+            is LockScreenStage.PatternAuthentication -> stage.copy(
+                failedAttempts = nextFailed,
+                errorMessage = "Biometric authentication failed",
+                biometricState = BiometricAuthState.IDLE
+            )
+            is LockScreenStage.PasswordAuthentication -> stage.copy(
+                failedAttempts = nextFailed,
+                errorMessage = "Biometric authentication failed",
+                biometricState = BiometricAuthState.IDLE
+            )
+            else -> stage
+        }
+        return LockTransitionResult(stage = nextStage, effects = effects)
+    }
+
+    private fun buildFailureEffects(failedCount: Int, settings: SecuritySettings): List<LockEffect> {
+        return buildList {
+            add(LockEffect.TriggerIntruderCapture)
+            if (failedCount >= 3 && settings.breakInSirenEnabled) {
+                add(LockEffect.TriggerBreakInSiren)
+            }
+        }
     }
 }

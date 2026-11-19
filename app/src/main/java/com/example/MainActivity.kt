@@ -24,6 +24,7 @@ import com.example.presentation.screens.intruders.IntruderVaultScreen
 import com.example.presentation.screens.lock.AppEntranceLockScreen
 import com.example.presentation.screens.settings.SettingsScreen
 import com.example.presentation.screens.vault.SecureVaultScreen
+import com.example.service.AppLockService
 import com.example.ui.theme.MyApplicationTheme
 import com.example.util.SecurePreferences
 import com.example.util.VaultStorageManager
@@ -50,11 +51,13 @@ class MainActivity : FragmentActivity() {
         enableEdgeToEdge()
 
         val securePrefs = SecurePreferences.getInstance(this)
-        repository = AppLockRepository(AppGuardDatabase.getDatabase(this).appLockDao())
+        repository = AppLockRepository(AppGuardDatabase.getDatabase(this).appLockDao(), securePrefs)
 
         lifecycleScope.launch(Dispatchers.IO) {
             VaultStorageManager.migrateLegacyInternalStorage(this@MainActivity)
+            repository.restoreLockedAppsIfNeeded(this@MainActivity)
         }
+        AppLockService.startIfPermitted(this)
 
         setContent {
             val settings by securePrefs.settingsFlow.collectAsStateWithLifecycle()
@@ -74,6 +77,7 @@ class MainActivity : FragmentActivity() {
                 val lifecycleOwner = LocalLifecycleOwner.current
                 var gateState by remember { mutableStateOf<AppGateState>(AppGateState.Locked) }
                 var suppressNextAutoLock by remember { mutableStateOf(false) }
+                var hasRequestedStartupPermissions by remember { mutableStateOf(false) }
 
                 DisposableEffect(lifecycleOwner) {
                     val observer = LifecycleEventObserver { _, event ->
@@ -95,6 +99,7 @@ class MainActivity : FragmentActivity() {
 
                 AnimatedContent(
                     targetState = gateState,
+                    contentKey = { it::class },
                     transitionSpec = { fadeIn() togetherWith fadeOut() },
                     label = "app_gate_transition"
                 ) { currentGate ->
@@ -130,6 +135,10 @@ class MainActivity : FragmentActivity() {
                                         AppGuardHomeScreen(
                                             repository = repository,
                                             context = this@MainActivity,
+                                            shouldRequestStartupPermissions = !hasRequestedStartupPermissions,
+                                            onStartupPermissionsRequested = {
+                                                hasRequestedStartupPermissions = true
+                                            },
                                             onNavigateToIntruders = {
                                                 gateState = AppGateState.Unlocked(AppDestination.INTRUDERS)
                                             },
@@ -183,6 +192,9 @@ class MainActivity : FragmentActivity() {
                                             context = this@MainActivity,
                                             onBack = {
                                                 gateState = AppGateState.Unlocked(AppDestination.HOME)
+                                            },
+                                            onSuppressNextRelock = {
+                                                suppressNextAutoLock = true
                                             }
                                         )
                                     }

@@ -1,26 +1,23 @@
 package com.example.presentation.screens.settings
 
+import android.app.admin.DevicePolicyManager
+import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -31,40 +28,36 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.example.R
-import com.example.domain.model.AutoLockPolicy
-import com.example.domain.model.TimeUnitOption
+import com.example.domain.model.PinValidator
+import com.example.receiver.DasmoDeviceAdminReceiver
 import com.example.service.AppLockService
 import com.example.ui.components.Icon3DBadge
-import com.example.ui.components.Section3DHeader
 import com.example.ui.components.Tactile3DCard
-import com.example.ui.components.TactileSettingSwitchCard
 import com.example.ui.theme.*
+import com.example.util.MasterKeyManager
 import com.example.util.SecurePreferences
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import com.example.util.update.AppUpdateManager
+import com.example.util.update.UpdateStatus
 
 private fun SettingsTab.icon(): ImageVector = when (this) {
     SettingsTab.SECURITY -> Icons.Default.Key
     SettingsTab.DECOY -> Icons.Default.VerifiedUser
     SettingsTab.DISGUISE -> Icons.Default.Calculate
     SettingsTab.AUTO_LOCK -> Icons.Default.Timer
+    SettingsTab.UPDATES -> Icons.Default.SystemUpdate
 }
 
 private fun SettingsTab.accentColors(): Pair<Color, Color> = when (this) {
@@ -72,6 +65,7 @@ private fun SettingsTab.accentColors(): Pair<Color, Color> = when (this) {
     SettingsTab.DECOY -> CyberCyan to Color(0xFF1D4ED8)
     SettingsTab.DISGUISE -> VividAmethyst to Color(0xFF4C1D95)
     SettingsTab.AUTO_LOCK -> NeonEmerald to Color(0xFF047857)
+    SettingsTab.UPDATES -> Color(0xFFEC4899) to Color(0xFF9D174D)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -79,21 +73,95 @@ private fun SettingsTab.accentColors(): Pair<Color, Color> = when (this) {
 fun SettingsScreen(
     context: Context,
     onBack: () -> Unit,
-    onSaved: () -> Unit = onBack
+    onSaved: () -> Unit = onBack,
+    onSuppressNextRelock: () -> Unit = {}
 ) {
     val haptic = LocalHapticFeedback.current
+    val scope = rememberCoroutineScope()
     val securePrefs = remember { SecurePreferences.getInstance(context) }
     val savedSettings by securePrefs.settingsFlow.collectAsStateWithLifecycle()
-    var draft by remember { mutableStateOf(SettingsDraftState.fromSettings(securePrefs.currentSettings())) }
-    var showDiscardDialog by remember { mutableStateOf(false) }
+    val savedQuestion = remember { securePrefs.getSecurityQuestion() }
+
+    val dpm = remember { context.getSystemService(Context.DEVICE_POLICY_SERVICE) as? DevicePolicyManager }
+    val adminComponent = remember { ComponentName(context, DasmoDeviceAdminReceiver::class.java) }
+
+    fun queryAdminActive(): Boolean = try {
+        dpm?.isAdminActive(adminComponent) == true
+    } catch (_: Exception) {
+        false
+    }
+
+    var isDeviceAdminActive by remember { mutableStateOf(queryAdminActive()) }
+
+    var draft by remember {
+        val initialSettings = securePrefs.currentSettings()
+        mutableStateOf(
+            SettingsDraftState.fromSettings(
+                settings = if (isDeviceAdminActive && !initialSettings.uninstallProtectionEnabled) {
+                    initialSettings.copy(uninstallProtectionEnabled = true)
+                } else {
+                    initialSettings
+                },
+                savedQuestion = savedQuestion
+            )
+        )
+    }
+
+    LaunchedEffect(isDeviceAdminActive) {
+        if (isDeviceAdminActive && !securePrefs.currentSettings().uninstallProtectionEnabled) {
+            securePrefs.updateSettings { it.copy(uninstallProtectionEnabled = true) }
+            draft = draft.copy(uninstallProtectionEnabled = true)
+        }
+    }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                isDeviceAdminActive = queryAdminActive()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    val deviceAdminLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) {
+        isDeviceAdminActive = queryAdminActive()
+    }
+
+    var modalState by remember { mutableStateOf<SettingsModalState>(SettingsModalState.None) }
+
+    val updateManager = remember { AppUpdateManager.getInstance() }
+    var updateStatus by remember { mutableStateOf<UpdateStatus>(UpdateStatus.Idle) }
 
     val hasUnsavedChanges = remember(draft, savedSettings) {
         draft.hasUnsavedChanges(savedSettings)
     }
 
+    fun launchDeviceAdminActivation() {
+        onSuppressNextRelock()
+        AppLockService.markAppUnlocked("com.android.settings")
+        try {
+            val intent = Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN).apply {
+                putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, adminComponent)
+                putExtra(
+                    DevicePolicyManager.EXTRA_ADD_EXPLANATION,
+                    "Activate DASMO Uninstall Protection to prevent intruders from removing the app without your Master PIN."
+                )
+            }
+            deviceAdminLauncher.launch(intent)
+        } catch (_: Exception) {
+            // Safe fallback if system Device Admin activity is unavailable
+        }
+    }
+
     fun attemptExit() {
-        if (hasUnsavedChanges) {
-            showDiscardDialog = true
+        if (modalState != SettingsModalState.None) {
+            modalState = SettingsModalState.None
+        } else if (hasUnsavedChanges) {
+            modalState = SettingsModalState.ConfirmDiscardChanges
         } else {
             onBack()
         }
@@ -103,34 +171,185 @@ fun SettingsScreen(
         attemptExit()
     }
 
-    if (showDiscardDialog) {
-        AlertDialog(
-            onDismissRequest = { showDiscardDialog = false },
-            containerColor = ObsidianSurface,
-            title = { Text("Discard Unsaved Changes?", fontWeight = FontWeight.Bold, color = PureWhite) },
-            text = {
-                Text(
-                    "You have modified security settings that have not been applied yet.",
-                    color = TextSecondary
-                )
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        showDiscardDialog = false
-                        onBack()
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = CrimsonAlert)
-                ) {
-                    Text("Discard")
+    when (val modal = modalState) {
+        SettingsModalState.None -> Unit
+
+        SettingsModalState.ConfirmDiscardChanges -> {
+            AlertDialog(
+                onDismissRequest = { modalState = SettingsModalState.None },
+                containerColor = ObsidianSurface,
+                title = { Text("Discard Unsaved Changes?", fontWeight = FontWeight.Bold, color = PureWhite) },
+                text = {
+                    Text(
+                        "You have modified security settings that have not been applied yet.",
+                        color = TextSecondary
+                    )
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            modalState = SettingsModalState.None
+                            onBack()
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = CrimsonAlert)
+                    ) {
+                        Text("Discard")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { modalState = SettingsModalState.None }) {
+                        Text("Keep Editing")
+                    }
                 }
-            },
-            dismissButton = {
-                TextButton(onClick = { showDiscardDialog = false }) {
-                    Text("Keep Editing")
+            )
+        }
+
+        is SettingsModalState.ConfirmDisableUninstallProtection -> {
+            val activeUnlockMethod = securePrefs.currentSettings().unlockMethod
+            val showPatternChallenge = activeUnlockMethod == com.example.domain.model.UnlockMethod.PATTERN &&
+                com.example.domain.model.PatternValidator.isValidEncodedPattern(securePrefs.currentSettings().masterPattern) &&
+                !modal.useRecoveryInput
+
+            AlertDialog(
+                onDismissRequest = { modalState = SettingsModalState.None },
+                containerColor = ObsidianSurface,
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.SecurityUpdateWarning,
+                            contentDescription = null,
+                            tint = CrimsonAlert
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            "Deactivate Uninstall Protection",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = PureWhite
+                        )
+                    }
+                },
+                text = {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        if (showPatternChallenge) {
+                            Text(
+                                "Draw your unlock Pattern to turn off uninstall protection:",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = TextSecondary
+                            )
+                            Spacer(modifier = Modifier.height(12.dp))
+                            com.example.ui.components.PatternLockView(
+                                isError = modal.error != null,
+                                resetKey = modal.error,
+                                testTag = "disable_uninstall_pattern_pad",
+                                modifier = Modifier.fillMaxWidth(0.85f),
+                                onPatternStart = {
+                                    if (modal.error != null) modalState = modal.copy(error = null)
+                                },
+                                onPatternComplete = { nodes ->
+                                    val current = securePrefs.currentSettings()
+                                    if (PinValidator.verifyAppUnlockPattern(nodes, current)) {
+                                        try {
+                                            dpm?.removeActiveAdmin(adminComponent)
+                                        } catch (_: Exception) {
+                                        }
+                                        isDeviceAdminActive = false
+                                        draft = draft.copy(uninstallProtectionEnabled = false)
+                                        securePrefs.updateSettings { it.copy(uninstallProtectionEnabled = false) }
+                                        modalState = SettingsModalState.None
+                                    } else {
+                                        modalState = modal.copy(error = "Incorrect Pattern!")
+                                    }
+                                }
+                            )
+                            TextButton(
+                                onClick = {
+                                    modalState = modal.copy(useRecoveryInput = true, error = null)
+                                }
+                            ) {
+                                Text("Use Master PIN or Recovery Key instead", color = NeonViolet)
+                            }
+                        } else {
+                            Text(
+                                "Enter your Master PIN, Password, or Master Recovery Key to turn off uninstall protection:",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = TextSecondary
+                            )
+                            Spacer(modifier = Modifier.height(14.dp))
+                            OutlinedTextField(
+                                value = modal.pinOrMasterKey,
+                                onValueChange = {
+                                    modalState = modal.copy(pinOrMasterKey = it, error = null)
+                                },
+                                label = { Text("Credential or Recovery Key") },
+                                isError = modal.error != null,
+                                visualTransformation = PasswordVisualTransformation(),
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                                singleLine = true,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("disable_uninstall_pin_input")
+                            )
+                            if (activeUnlockMethod == com.example.domain.model.UnlockMethod.PATTERN &&
+                                com.example.domain.model.PatternValidator.isValidEncodedPattern(securePrefs.currentSettings().masterPattern)
+                            ) {
+                                TextButton(
+                                    onClick = {
+                                        modalState = modal.copy(useRecoveryInput = false, error = null)
+                                    },
+                                    modifier = Modifier.align(Alignment.End)
+                                ) {
+                                    Text("Draw Pattern instead", color = NeonViolet)
+                                }
+                            }
+                        }
+                        if (modal.error != null) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = modal.error,
+                                color = CrimsonAlert,
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.testTag("disable_uninstall_error")
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    if (!showPatternChallenge) {
+                        Button(
+                            colors = ButtonDefaults.buttonColors(containerColor = CrimsonAlert),
+                            onClick = {
+                                val current = securePrefs.currentSettings()
+                                val validPin = PinValidator.verifyAppUnlockPin(modal.pinOrMasterKey, current)
+                                val validPassword = PinValidator.verifyAppUnlockPassword(modal.pinOrMasterKey, current)
+                                val validMasterKey = MasterKeyManager.isMasterKey(modal.pinOrMasterKey)
+                                if (validPin || validPassword || validMasterKey) {
+                                    try {
+                                        dpm?.removeActiveAdmin(adminComponent)
+                                    } catch (_: Exception) {
+                                        // Safe fallback
+                                    }
+                                    isDeviceAdminActive = false
+                                    draft = draft.copy(uninstallProtectionEnabled = false)
+                                    securePrefs.updateSettings { it.copy(uninstallProtectionEnabled = false) }
+                                    modalState = SettingsModalState.None
+                                } else {
+                                    modalState = modal.copy(error = "Incorrect credential or Master Key!")
+                                }
+                            },
+                            modifier = Modifier.testTag("disable_uninstall_confirm_btn")
+                        ) {
+                            Text("Verify & Deactivate")
+                        }
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { modalState = SettingsModalState.None }) {
+                        Text("Cancel")
+                    }
                 }
-            }
-        )
+            )
+        }
     }
 
     Scaffold(
@@ -206,8 +425,11 @@ fun SettingsScreen(
                                 }
                                 is SettingsSaveResult.Valid -> {
                                     securePrefs.updateSettings { result.updatedSettings }
+                                    result.recoveryUpdate?.let { (q, a) ->
+                                        securePrefs.setSecurityRecovery(q, a)
+                                    }
                                     if (result.updatedSettings.autoLockTimeoutMillis == 0L) {
-                                        AppLockService.unlockedApps.clear()
+                                        AppLockService.clearUnlockedSessions()
                                     }
                                     onSaved()
                                 }
@@ -240,7 +462,6 @@ fun SettingsScreen(
                 .fillMaxSize()
                 .padding(paddingValues)
         ) {
-            // Category Navigation Pills with 3D Badges & Smooth Selection
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -280,7 +501,6 @@ fun SettingsScreen(
                 }
             }
 
-            // Animated Category Body Transition
             AnimatedContent(
                 targetState = draft.activeTab,
                 transitionSpec = {
@@ -303,19 +523,42 @@ fun SettingsScreen(
                     when (currentTab) {
                         SettingsTab.SECURITY -> SecurityCategoryContent(
                             draft = draft,
-                            onDraftChange = { draft = it }
+                            hasSavedRecoveryQuestion = savedQuestion.isNotBlank(),
+                            isDeviceAdminActive = isDeviceAdminActive,
+                            onDraftChange = { draft = it },
+                            onEnableUninstallProtection = {
+                                draft = draft.copy(uninstallProtectionEnabled = true)
+                                securePrefs.updateSettings { it.copy(uninstallProtectionEnabled = true) }
+                                launchDeviceAdminActivation()
+                            },
+                            onRequestDisableUninstallProtection = {
+                                modalState = SettingsModalState.ConfirmDisableUninstallProtection()
+                            },
+                            onGrantDeviceAdmin = { launchDeviceAdminActivation() }
                         )
+
                         SettingsTab.DECOY -> DecoyCategoryContent(
                             draft = draft,
                             onDraftChange = { draft = it }
                         )
+
                         SettingsTab.DISGUISE -> DisguiseCategoryContent(
                             draft = draft,
                             onDraftChange = { draft = it }
                         )
+
                         SettingsTab.AUTO_LOCK -> AutoLockCategoryContent(
                             draft = draft,
                             onDraftChange = { draft = it }
+                        )
+
+                        SettingsTab.UPDATES -> UpdatesCategoryContent(
+                            context = context,
+                            scope = scope,
+                            updateManager = updateManager,
+                            updateStatus = updateStatus,
+                            onUpdateStatusChange = { updateStatus = it },
+                            onSuppressNextRelock = onSuppressNextRelock
                         )
                     }
                     Spacer(modifier = Modifier.height(16.dp))
@@ -323,612 +566,4 @@ fun SettingsScreen(
             }
         }
     }
-}
-
-@Composable
-private fun SecurityCategoryContent(
-    draft: SettingsDraftState,
-    onDraftChange: (SettingsDraftState) -> Unit
-) {
-    var showPinText by remember { mutableStateOf(false) }
-    val liveTimePinExample = remember {
-        SimpleDateFormat("HHmm", Locale.US).format(Date())
-    }
-
-    // 3D Hero Card with img_shield_3d
-    Tactile3DCard(highlighted = true, modifier = Modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(
-                    Brush.horizontalGradient(
-                        listOf(Color(0xFF281448), Color(0xFF130D22))
-                    )
-                )
-                .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Image(
-                painter = painterResource(id = R.drawable.img_shield_3d),
-                contentDescription = "3D Security Shield",
-                contentScale = ContentScale.Crop,
-                modifier = Modifier
-                    .size(64.dp)
-                    .clip(RoundedCornerShape(16.dp))
-            )
-            Spacer(modifier = Modifier.width(14.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    "Access & Active Defense",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = PureWhite
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    "Configure your 4-digit Master PIN and real-time anti-intruder shields.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = TextSecondary
-                )
-            }
-        }
-    }
-
-    Section3DHeader(
-        icon = Icons.Default.Pin,
-        title = "Master PIN Credentials",
-        subtitle = "Required to unlock apps, Vault & Calculator disguise"
-    )
-
-    Tactile3DCard(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    for (i in 0 until 4) {
-                        val filled = i < draft.newPin.length
-                        Box(
-                            modifier = Modifier
-                                .size(12.dp)
-                                .background(
-                                    color = if (filled) NeonViolet else ObsidianSurfaceVariant,
-                                    shape = CircleShape
-                                )
-                        )
-                    }
-                }
-                IconButton(
-                    onClick = { showPinText = !showPinText },
-                    modifier = Modifier.size(36.dp)
-                ) {
-                    Icon(
-                        imageVector = if (showPinText) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                        contentDescription = if (showPinText) "Hide PIN" else "Show PIN",
-                        tint = NeonViolet
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            val visual = if (showPinText) VisualTransformation.None else PasswordVisualTransformation()
-            OutlinedTextField(
-                value = draft.newPin,
-                onValueChange = { raw ->
-                    val filtered = raw.filter { it.isDigit() }.take(4)
-                    onDraftChange(draft.copy(newPin = filtered, pinError = null))
-                },
-                label = { Text("New PIN (4 digits)") },
-                placeholder = { Text("Leave blank to keep current") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
-                visualTransformation = visual,
-                isError = draft.pinError != null,
-                singleLine = true,
-                shape = RoundedCornerShape(14.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("settings_new_pin_input")
-            )
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            OutlinedTextField(
-                value = draft.confirmPin,
-                onValueChange = { raw ->
-                    val filtered = raw.filter { it.isDigit() }.take(4)
-                    onDraftChange(draft.copy(confirmPin = filtered, pinError = null))
-                },
-                label = { Text("Confirm New PIN") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
-                visualTransformation = visual,
-                isError = draft.pinError != null,
-                singleLine = true,
-                shape = RoundedCornerShape(14.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("settings_confirm_pin_input")
-            )
-
-            AnimatedVisibility(visible = draft.pinError != null) {
-                Text(
-                    text = draft.pinError.orEmpty(),
-                    color = CrimsonAlert,
-                    style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier
-                        .padding(top = 8.dp)
-                        .testTag("settings_pin_error")
-                )
-            }
-        }
-    }
-
-    Section3DHeader(
-        icon = Icons.Default.Shield,
-        title = "Active Defense Modules",
-        subtitle = "Intelligent lockscreen countermeasures"
-    )
-
-    TactileSettingSwitchCard(
-        icon = Icons.Default.Schedule,
-        title = "Dynamic Time PIN",
-        description = "Accepts current clock time (right now: $liveTimePinExample). Shoulder surfers cannot reuse an old PIN.",
-        checked = draft.dynamicTimePinEnabled,
-        badgeText = if (draft.dynamicTimePinEnabled) "Now: $liveTimePinExample" else null,
-        accentStart = ElectricPurple,
-        accentEnd = DeepViolet,
-        testTag = "switch_dynamic_time_pin",
-        onCheckedChange = { onDraftChange(draft.copy(dynamicTimePinEnabled = it)) }
-    )
-
-    TactileSettingSwitchCard(
-        icon = Icons.Default.Dialpad,
-        title = "Anti-Peep Scrambled Keypad",
-        description = "Shuffles digits (0–9) into a fresh random layout each time an app lock opens.",
-        checked = draft.scrambleKeypadEnabled,
-        accentStart = CyberCyan,
-        accentEnd = Color(0xFF1D4ED8),
-        testTag = "switch_scramble_keypad",
-        onCheckedChange = { onDraftChange(draft.copy(scrambleKeypadEnabled = it)) }
-    )
-
-    TactileSettingSwitchCard(
-        icon = Icons.Default.NotificationsActive,
-        title = "Break-In Siren Alarm",
-        description = "Triggers a loud alarm tone & tactile vibration alert after 3 consecutive failed unlock attempts.",
-        checked = draft.breakInSirenEnabled,
-        accentStart = CrimsonAlert,
-        accentEnd = Color(0xFF9F1239),
-        testTag = "switch_break_in_siren",
-        onCheckedChange = { onDraftChange(draft.copy(breakInSirenEnabled = it)) }
-    )
-
-    TactileSettingSwitchCard(
-        icon = Icons.Default.AdminPanelSettings,
-        title = "Uninstall Protection",
-        description = "Locks Android Package Installer screens with your Master PIN so unauthorized users cannot uninstall apps.",
-        checked = draft.uninstallProtectionEnabled,
-        accentStart = NeonEmerald,
-        accentEnd = Color(0xFF047857),
-        testTag = "switch_uninstall_protection",
-        onCheckedChange = { onDraftChange(draft.copy(uninstallProtectionEnabled = it)) }
-    )
-}
-
-@Composable
-private fun DecoyCategoryContent(
-    draft: SettingsDraftState,
-    onDraftChange: (SettingsDraftState) -> Unit
-) {
-    var showDecoyText by remember { mutableStateOf(false) }
-
-    Tactile3DCard(highlighted = draft.decoyPinInput.length == 4, modifier = Modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(
-                    Brush.horizontalGradient(
-                        listOf(Color(0xFF102A43), Color(0xFF130D22))
-                    )
-                )
-                .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Image(
-                painter = painterResource(id = R.drawable.img_vault_3d),
-                contentDescription = "3D Encrypted Vault",
-                contentScale = ContentScale.Crop,
-                modifier = Modifier
-                    .size(64.dp)
-                    .clip(RoundedCornerShape(16.dp))
-            )
-            Spacer(modifier = Modifier.width(14.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    "Decoy / Panic Vault Mode",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = PureWhite
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    "If coerced, unlock the Vault using this PIN to show harmless decoy notes while real encrypted files stay invisible.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = TextSecondary
-                )
-            }
-        }
-    }
-
-    Section3DHeader(
-        icon = Icons.Default.VerifiedUser,
-        title = "Decoy PIN Setup",
-        subtitle = "Must differ from your Master PIN",
-        accentStart = CyberCyan,
-        accentEnd = Color(0xFF1D4ED8)
-    )
-
-    Tactile3DCard(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Surface(
-                    shape = CircleShape,
-                    color = if (draft.decoyPinInput.length == 4) CyberCyan.copy(alpha = 0.2f) else ObsidianSurfaceVariant,
-                    border = BorderStroke(
-                        1.dp,
-                        if (draft.decoyPinInput.length == 4) CyberCyan else ObsidianBorder
-                    )
-                ) {
-                    Text(
-                        text = if (draft.decoyPinInput.length == 4) "Decoy PIN Configured" else "Decoy Disabled",
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (draft.decoyPinInput.length == 4) CyberCyan else TextSecondary,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-
-                IconButton(
-                    onClick = { showDecoyText = !showDecoyText },
-                    modifier = Modifier.size(36.dp)
-                ) {
-                    Icon(
-                        imageVector = if (showDecoyText) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                        contentDescription = if (showDecoyText) "Hide Decoy PIN" else "Show Decoy PIN",
-                        tint = CyberCyan
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            OutlinedTextField(
-                value = draft.decoyPinInput,
-                onValueChange = { raw ->
-                    val filtered = raw.filter { it.isDigit() }.take(4)
-                    onDraftChange(draft.copy(decoyPinInput = filtered, decoyPinError = null))
-                },
-                label = { Text("Decoy PIN (4 digits)") },
-                placeholder = { Text("e.g. 0000") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
-                visualTransformation = if (showDecoyText) VisualTransformation.None else PasswordVisualTransformation(),
-                isError = draft.decoyPinError != null,
-                singleLine = true,
-                shape = RoundedCornerShape(14.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("settings_decoy_pin_input")
-            )
-
-            AnimatedVisibility(visible = draft.decoyPinError != null) {
-                Text(
-                    text = draft.decoyPinError.orEmpty(),
-                    color = CrimsonAlert,
-                    style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier
-                        .padding(top = 8.dp)
-                        .testTag("settings_decoy_error")
-                )
-            }
-
-            if (draft.decoyPinInput.isNotEmpty()) {
-                Spacer(modifier = Modifier.height(10.dp))
-                TextButton(
-                    onClick = {
-                        onDraftChange(draft.copy(decoyPinInput = "", decoyPinError = null))
-                    },
-                    modifier = Modifier.align(Alignment.End)
-                ) {
-                    Text("Clear & Disable Decoy Mode", color = CrimsonAlert)
-                }
-            } else {
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    "Leave blank to keep Decoy Mode disabled.",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = TextTertiary
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun DisguiseCategoryContent(
-    draft: SettingsDraftState,
-    onDraftChange: (SettingsDraftState) -> Unit
-) {
-    Section3DHeader(
-        icon = Icons.Default.Calculate,
-        title = "Stealth Camouflage",
-        subtitle = "Hide DASMO LOCK behind a working utility interface",
-        accentStart = VividAmethyst,
-        accentEnd = Color(0xFF4C1D95)
-    )
-
-    TactileSettingSwitchCard(
-        icon = Icons.Default.Calculate,
-        title = "Calculator Disguise",
-        description = "Displays a working purple-dark calculator when opening DASMO LOCK. Type your Master PIN and press '=' to enter.",
-        checked = draft.calculatorDisguiseEnabled,
-        badgeText = if (draft.calculatorDisguiseEnabled) "Stealth On" else null,
-        accentStart = VividAmethyst,
-        accentEnd = Color(0xFF4C1D95),
-        testTag = "switch_calculator_disguise",
-        onCheckedChange = { onDraftChange(draft.copy(calculatorDisguiseEnabled = it)) }
-    )
-
-    Tactile3DCard(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon3DBadge(
-                    icon = Icons.Default.Info,
-                    contentDescription = null,
-                    size = 34.dp,
-                    accentStart = ElectricPurple,
-                    accentEnd = DeepViolet
-                )
-                Spacer(modifier = Modifier.width(12.dp))
-                Text(
-                    "How to Unlock Calculator Camouflage",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = PureWhite
-                )
-            }
-            Spacer(modifier = Modifier.height(10.dp))
-            Text(
-                "1. Anyone opening the app sees a genuine calculator with arithmetic, decimals, percentages & sign toggle.\n" +
-                    "2. Type your 4-digit Master PIN (or Dynamic Time PIN if enabled) on a clean display and press '='.\n" +
-                    "3. No secret long-press shortcuts or hints are shown to intruders.",
-                style = MaterialTheme.typography.bodySmall,
-                color = TextSecondary
-            )
-        }
-    }
-}
-
-@Composable
-private fun AutoLockCategoryContent(
-    draft: SettingsDraftState,
-    onDraftChange: (SettingsDraftState) -> Unit
-) {
-    val haptic = LocalHapticFeedback.current
-
-    Section3DHeader(
-        icon = Icons.Default.Timer,
-        title = "Re-Lock Timing",
-        subtitle = "Screen-off always re-locks immediately for safety",
-        accentStart = NeonEmerald,
-        accentEnd = Color(0xFF047857)
-    )
-
-    AutoLockPolicy.PRESET_TIMEOUTS_MILLIS.chunked(2).forEach { rowPresets ->
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            rowPresets.forEach { (millis, label) ->
-                val isSelected = draft.autoLockSelection is AutoLockDraftSelection.Preset &&
-                    draft.autoLockSelection.timeoutMillis == millis
-                Tactile3DCard(
-                    highlighted = isSelected,
-                    shape = RoundedCornerShape(16.dp),
-                    onClick = {
-                        onDraftChange(
-                            draft.copy(
-                                autoLockSelection = AutoLockDraftSelection.Preset(millis),
-                                customTimeoutError = null
-                            )
-                        )
-                    },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .padding(horizontal = 12.dp, vertical = 10.dp)
-                            .fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = label,
-                            style = MaterialTheme.typography.bodySmall,
-                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                            color = if (isSelected) PureWhite else TextSecondary,
-                            modifier = Modifier.weight(1f)
-                        )
-                        RadioButton(
-                            selected = isSelected,
-                            onClick = {
-                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                onDraftChange(
-                                    draft.copy(
-                                        autoLockSelection = AutoLockDraftSelection.Preset(millis),
-                                        customTimeoutError = null
-                                    )
-                                )
-                            }
-                        )
-                    }
-                }
-            }
-        }
-    }
-
-    val customSelection = draft.autoLockSelection as? AutoLockDraftSelection.Custom
-    val isCustomSelected = customSelection != null
-
-    Tactile3DCard(
-        highlighted = isCustomSelected,
-        shape = RoundedCornerShape(18.dp),
-        onClick = {
-            if (!isCustomSelected) {
-                onDraftChange(
-                    draft.copy(
-                        autoLockSelection = AutoLockDraftSelection.Custom(
-                            numberInput = "45",
-                            unit = TimeUnitOption.SECONDS
-                        ),
-                        customTimeoutError = null
-                    )
-                )
-            }
-        },
-        modifier = Modifier
-            .fillMaxWidth()
-            .testTag("autolock_custom_card")
-    ) {
-        Column(modifier = Modifier.padding(14.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon3DBadge(
-                        icon = Icons.Default.Tune,
-                        contentDescription = null,
-                        size = 36.dp,
-                        accentStart = if (isCustomSelected) NeonEmerald else Color(0xFF3E2C66),
-                        accentEnd = if (isCustomSelected) Color(0xFF047857) else Color(0xFF1F1635)
-                    )
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Column {
-                        Text(
-                            "Custom Duration",
-                            fontWeight = if (isCustomSelected) FontWeight.Bold else FontWeight.SemiBold,
-                            color = PureWhite
-                        )
-                        Text(
-                            "Set exact seconds or minutes",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = TextTertiary
-                        )
-                    }
-                }
-                RadioButton(
-                    selected = isCustomSelected,
-                    onClick = {
-                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                        if (!isCustomSelected) {
-                            onDraftChange(
-                                draft.copy(
-                                    autoLockSelection = AutoLockDraftSelection.Custom(
-                                        numberInput = "45",
-                                        unit = TimeUnitOption.SECONDS
-                                    ),
-                                    customTimeoutError = null
-                                )
-                            )
-                        }
-                    }
-                )
-            }
-
-            AnimatedVisibility(
-                visible = customSelection != null,
-                enter = expandVertically(spring(dampingRatio = Spring.DampingRatioLowBouncy)) + fadeIn(),
-                exit = shrinkVertically() + fadeOut()
-            ) {
-                if (customSelection != null) {
-                    Column(modifier = Modifier.padding(top = 12.dp)) {
-                        OutlinedTextField(
-                            value = customSelection.numberInput,
-                            onValueChange = { raw ->
-                                val digits = raw.filter { it.isDigit() }.take(5)
-                                onDraftChange(
-                                    draft.copy(
-                                        autoLockSelection = customSelection.copy(numberInput = digits),
-                                        customTimeoutError = null
-                                    )
-                                )
-                            },
-                            label = { Text("Duration (${customSelection.unit.label})") },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            singleLine = true,
-                            isError = draft.customTimeoutError != null,
-                            shape = RoundedCornerShape(14.dp),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("autolock_custom_input")
-                        )
-                        Spacer(modifier = Modifier.height(10.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            TimeUnitOption.entries.forEach { unit ->
-                                FilterChip(
-                                    selected = customSelection.unit == unit,
-                                    onClick = {
-                                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                        onDraftChange(
-                                            draft.copy(
-                                                autoLockSelection = customSelection.copy(unit = unit),
-                                                customTimeoutError = null
-                                            )
-                                        )
-                                    },
-                                    label = { Text(unit.label) },
-                                    modifier = Modifier.testTag("autolock_unit_${unit.name.lowercase()}")
-                                )
-                            }
-                        }
-                        if (draft.customTimeoutError != null) {
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text(
-                                text = draft.customTimeoutError,
-                                color = CrimsonAlert,
-                                style = MaterialTheme.typography.bodySmall,
-                                modifier = Modifier.testTag("autolock_custom_error")
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    Section3DHeader(
-        icon = Icons.Default.PhonelinkLock,
-        title = "Screen & Recents Privacy",
-        subtitle = "Protect sensitive UI from capture",
-        accentStart = ElectricPurple,
-        accentEnd = DeepViolet
-    )
-
-    TactileSettingSwitchCard(
-        icon = Icons.Default.ScreenshotMonitor,
-        title = "Prevent Screenshots & Blur Recents",
-        description = "Applies FLAG_SECURE to black out app previews in Android Recents and block screen recording.",
-        checked = draft.preventScreenshots,
-        accentStart = ElectricPurple,
-        accentEnd = DeepViolet,
-        testTag = "switch_prevent_screenshots",
-        onCheckedChange = { onDraftChange(draft.copy(preventScreenshots = it)) }
-    )
 }

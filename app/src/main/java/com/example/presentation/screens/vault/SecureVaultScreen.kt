@@ -24,6 +24,8 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -45,6 +47,10 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -53,9 +59,13 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
+import com.example.domain.model.PasswordValidator
+import com.example.domain.model.PatternValidator
 import com.example.domain.model.PinMatchResult
 import com.example.domain.model.PinValidator
+import com.example.domain.model.UnlockMethod
 import com.example.ui.components.Icon3DBadge
+import com.example.ui.components.PatternLockView
 import com.example.ui.components.Tactile3DCard
 import com.example.ui.theme.*
 import com.example.util.CryptoManager
@@ -175,18 +185,23 @@ fun SecureVaultScreen(
                     }
 
                     resolver.openInputStream(uri)?.let { inputStream ->
+                        var lastReportedPercent = -1
                         val encrypted = CryptoManager.encryptBytesWithProgress(
                             inputStream = inputStream,
                             totalBytes = fileSize
                         ) { readSoFar, _ ->
                             val currentGrand = baseProcessed + readSoFar
-                            coroutineScope.launch(Dispatchers.Main) {
-                                val currentProgress = progressState
-                                if (currentProgress is VaultProgressState.Active) {
-                                    progressState = currentProgress.copy(
-                                        bytesProcessed = currentGrand,
-                                        fraction = if (grandTotal > 0) currentGrand.toFloat() / grandTotal else (index + 1f) / uris.size
-                                    )
+                            val percent = if (grandTotal > 0) ((currentGrand * 100) / grandTotal).toInt() else 0
+                            if (percent != lastReportedPercent) {
+                                lastReportedPercent = percent
+                                coroutineScope.launch(Dispatchers.Main) {
+                                    val currentProgress = progressState
+                                    if (currentProgress is VaultProgressState.Active) {
+                                        progressState = currentProgress.copy(
+                                            bytesProcessed = currentGrand,
+                                            fraction = if (grandTotal > 0) currentGrand.toFloat() / grandTotal else (index + 1f) / uris.size
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -368,9 +383,20 @@ fun SecureVaultScreen(
 
     when (val currentAccess = accessState) {
         is VaultAccessState.Locked -> {
+            val activeVaultMethod = when {
+                currentAccess.forcePinMode -> UnlockMethod.PIN
+                settings.unlockMethod == UnlockMethod.PATTERN &&
+                    PatternValidator.isValidEncodedPattern(settings.masterPattern) -> UnlockMethod.PATTERN
+                settings.unlockMethod == UnlockMethod.PASSWORD &&
+                    PasswordValidator.isValidPassword(settings.masterPassword) -> UnlockMethod.PASSWORD
+                else -> UnlockMethod.PIN
+            }
+
             VaultLockedContent(
-                enteredPin = currentAccess.enteredPin,
-                errorMessage = currentAccess.errorMessage,
+                state = currentAccess,
+                activeMethod = activeVaultMethod,
+                canTogglePinMode = settings.unlockMethod != UnlockMethod.PIN,
+                preferredMethodLabel = settings.unlockMethod.label,
                 recoveryState = recoveryState,
                 securityQuestion = remember { securePrefs.getSecurityQuestion() },
                 onBack = onBack,
@@ -397,7 +423,7 @@ fun SecureVaultScreen(
                                         reloadVaultItems(VaultMode.DECOY)
                                     }
                                     PinMatchResult.Mismatch -> {
-                                        accessState = VaultAccessState.Locked(
+                                        accessState = currentAccess.copy(
                                             enteredPin = "",
                                             errorMessage = "Incorrect PIN. Access Denied."
                                         )
@@ -406,6 +432,55 @@ fun SecureVaultScreen(
                             }
                         }
                     }
+                },
+                onPatternStart = {
+                    if (currentAccess.errorMessage != null) {
+                        accessState = currentAccess.copy(errorMessage = null)
+                    }
+                },
+                onPatternComplete = { nodes ->
+                    if (!PatternValidator.isValidPattern(nodes)) {
+                        accessState = currentAccess.copy(
+                            patternAttemptCount = currentAccess.patternAttemptCount + 1,
+                            errorMessage = "Connect at least ${PatternValidator.MIN_NODES} dots"
+                        )
+                    } else if (PinValidator.verifyAppUnlockPattern(nodes, settings)) {
+                        accessState = VaultAccessState.Unlocked(mode = VaultMode.REAL, isLoading = true)
+                        reloadVaultItems(VaultMode.REAL)
+                    } else {
+                        accessState = currentAccess.copy(
+                            patternAttemptCount = currentAccess.patternAttemptCount + 1,
+                            errorMessage = "Incorrect Pattern. Access Denied."
+                        )
+                    }
+                },
+                onPasswordChanged = { raw ->
+                    accessState = currentAccess.copy(
+                        enteredPassword = raw.take(PasswordValidator.MAX_LENGTH),
+                        errorMessage = null
+                    )
+                },
+                onTogglePasswordVisible = {
+                    accessState = currentAccess.copy(passwordVisible = !currentAccess.passwordVisible)
+                },
+                onPasswordSubmit = {
+                    if (PinValidator.verifyAppUnlockPassword(currentAccess.enteredPassword, settings)) {
+                        accessState = VaultAccessState.Unlocked(mode = VaultMode.REAL, isLoading = true)
+                        reloadVaultItems(VaultMode.REAL)
+                    } else {
+                        accessState = currentAccess.copy(
+                            enteredPassword = "",
+                            errorMessage = "Incorrect Password. Access Denied."
+                        )
+                    }
+                },
+                onTogglePinMode = {
+                    accessState = currentAccess.copy(
+                        forcePinMode = !currentAccess.forcePinMode,
+                        enteredPin = "",
+                        enteredPassword = "",
+                        errorMessage = null
+                    )
                 },
                 onOpenRecovery = { recoveryState = VaultRecoveryState.Visible() },
                 onUpdateRecovery = { recoveryState = it },
@@ -1156,12 +1231,20 @@ fun SecureVaultScreen(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun VaultLockedContent(
-    enteredPin: String,
-    errorMessage: String?,
+    state: VaultAccessState.Locked,
+    activeMethod: UnlockMethod,
+    canTogglePinMode: Boolean,
+    preferredMethodLabel: String,
     recoveryState: VaultRecoveryState,
     securityQuestion: String,
     onBack: () -> Unit,
     onKey: (String) -> Unit,
+    onPatternStart: () -> Unit,
+    onPatternComplete: (List<Int>) -> Unit,
+    onPasswordChanged: (String) -> Unit,
+    onTogglePasswordVisible: () -> Unit,
+    onPasswordSubmit: () -> Unit,
+    onTogglePinMode: () -> Unit,
     onOpenRecovery: () -> Unit,
     onUpdateRecovery: (VaultRecoveryState) -> Unit,
     onVerifyRecovery: (String) -> Unit
@@ -1184,6 +1267,7 @@ private fun VaultLockedContent(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(paddingValues)
+                .imePadding()
                 .verticalScroll(rememberScrollState())
                 .padding(24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -1191,7 +1275,7 @@ private fun VaultLockedContent(
         ) {
             Box(
                 modifier = Modifier
-                    .size(92.dp)
+                    .size(86.dp)
                     .shadow(16.dp, RoundedCornerShape(24.dp), ambientColor = ElectricPurple, spotColor = ElectricPurple)
                     .clip(RoundedCornerShape(24.dp))
                     .border(1.5.dp, NeonViolet.copy(alpha = 0.7f), RoundedCornerShape(24.dp))
@@ -1204,58 +1288,140 @@ private fun VaultLockedContent(
                 )
             }
 
-            Spacer(Modifier.height(16.dp))
-            Text("Enter Vault PIN", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = PureWhite)
+            Spacer(Modifier.height(14.dp))
+            Text(
+                text = when (activeMethod) {
+                    UnlockMethod.PIN -> "Enter Vault PIN"
+                    UnlockMethod.PATTERN -> "Draw Vault Pattern"
+                    UnlockMethod.PASSWORD -> "Enter Vault Password"
+                },
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+                color = PureWhite
+            )
             Spacer(Modifier.height(6.dp))
             Text(
-                "Enter your Master PIN or Decoy PIN to unlock",
+                text = when (activeMethod) {
+                    UnlockMethod.PIN -> "Enter your Master PIN or Decoy PIN to unlock"
+                    UnlockMethod.PATTERN -> "Draw your Master Pattern to decrypt files"
+                    UnlockMethod.PASSWORD -> "Enter your Master Password to decrypt files"
+                },
                 style = MaterialTheme.typography.bodyMedium,
                 color = TextSecondary,
                 textAlign = TextAlign.Center
             )
-            Spacer(Modifier.height(24.dp))
+            Spacer(Modifier.height(20.dp))
 
-            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                repeat(4) { idx ->
-                    val filled = idx < enteredPin.length
-                    Box(
-                        modifier = Modifier
-                            .size(18.dp)
-                            .clip(CircleShape)
-                            .background(if (filled) NeonViolet else ObsidianSurfaceVariant)
-                            .border(1.dp, if (filled) PureWhite.copy(alpha = 0.7f) else ObsidianBorder, CircleShape)
+            when (activeMethod) {
+                UnlockMethod.PATTERN -> {
+                    if (!state.errorMessage.isNullOrBlank()) {
+                        Text(state.errorMessage, color = CrimsonAlert, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(12.dp))
+                    }
+                    PatternLockView(
+                        isError = state.errorMessage != null,
+                        resetKey = state.patternAttemptCount,
+                        testTag = "vault_pattern_pad",
+                        modifier = Modifier.fillMaxWidth(0.84f),
+                        onPatternStart = onPatternStart,
+                        onPatternComplete = onPatternComplete
                     )
                 }
-            }
 
-            if (!errorMessage.isNullOrBlank()) {
-                Spacer(Modifier.height(14.dp))
-                Text(errorMessage, color = CrimsonAlert, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
-            }
-
-            Spacer(Modifier.height(26.dp))
-            val rows = remember { listOf(listOf("1", "2", "3"), listOf("4", "5", "6"), listOf("7", "8", "9"), listOf("C", "0", "⌫")) }
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                rows.forEach { row ->
-                    Row(horizontalArrangement = Arrangement.spacedBy(18.dp)) {
-                        row.forEach { key ->
-                            val isAction = key == "C" || key == "⌫"
-                            Surface(
-                                onClick = { onKey(key) },
-                                shape = RoundedCornerShape(18.dp),
-                                color = if (isAction) ObsidianElevated else ObsidianSurface,
-                                contentColor = if (isAction) LavenderGlow else PureWhite,
-                                border = BorderStroke(1.dp, ObsidianBorder),
-                                shadowElevation = 6.dp,
-                                modifier = Modifier
-                                    .size(70.dp)
-                                    .testTag("vault_key_$key")
+                UnlockMethod.PASSWORD -> {
+                    OutlinedTextField(
+                        value = state.enteredPassword,
+                        onValueChange = onPasswordChanged,
+                        label = { Text("Master Password") },
+                        singleLine = true,
+                        isError = state.errorMessage != null,
+                        visualTransformation = if (state.passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Password,
+                            imeAction = ImeAction.Done
+                        ),
+                        keyboardActions = KeyboardActions(onDone = { onPasswordSubmit() }),
+                        trailingIcon = {
+                            IconButton(
+                                onClick = onTogglePasswordVisible,
+                                modifier = Modifier.size(48.dp)
                             ) {
-                                Box(contentAlignment = Alignment.Center) {
-                                    if (key == "⌫") {
-                                        Icon(Icons.AutoMirrored.Filled.Backspace, contentDescription = "Backspace")
-                                    } else {
-                                        Text(key, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                                Icon(
+                                    imageVector = if (state.passwordVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                    contentDescription = if (state.passwordVisible) "Hide Password" else "Show Password",
+                                    tint = NeonViolet
+                                )
+                            }
+                        },
+                        shape = RoundedCornerShape(16.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .widthIn(max = 360.dp)
+                            .testTag("vault_password_input")
+                    )
+                    if (!state.errorMessage.isNullOrBlank()) {
+                        Spacer(Modifier.height(10.dp))
+                        Text(state.errorMessage, color = CrimsonAlert, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
+                    }
+                    Spacer(Modifier.height(16.dp))
+                    Button(
+                        onClick = onPasswordSubmit,
+                        colors = ButtonDefaults.buttonColors(containerColor = ElectricPurple, contentColor = PureWhite),
+                        shape = RoundedCornerShape(16.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .widthIn(max = 360.dp)
+                            .height(50.dp)
+                            .testTag("vault_password_submit_btn")
+                    ) {
+                        Text("Unlock Vault", fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                UnlockMethod.PIN -> {
+                    Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                        repeat(4) { idx ->
+                            val filled = idx < state.enteredPin.length
+                            Box(
+                                modifier = Modifier
+                                    .size(18.dp)
+                                    .clip(CircleShape)
+                                    .background(if (filled) NeonViolet else ObsidianSurfaceVariant)
+                                    .border(1.dp, if (filled) PureWhite.copy(alpha = 0.7f) else ObsidianBorder, CircleShape)
+                            )
+                        }
+                    }
+
+                    if (!state.errorMessage.isNullOrBlank()) {
+                        Spacer(Modifier.height(14.dp))
+                        Text(state.errorMessage, color = CrimsonAlert, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
+                    }
+
+                    Spacer(Modifier.height(24.dp))
+                    val rows = remember { listOf(listOf("1", "2", "3"), listOf("4", "5", "6"), listOf("7", "8", "9"), listOf("C", "0", "⌫")) }
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        rows.forEach { row ->
+                            Row(horizontalArrangement = Arrangement.spacedBy(18.dp)) {
+                                row.forEach { key ->
+                                    val isAction = key == "C" || key == "⌫"
+                                    Surface(
+                                        onClick = { onKey(key) },
+                                        shape = RoundedCornerShape(18.dp),
+                                        color = if (isAction) ObsidianElevated else ObsidianSurface,
+                                        contentColor = if (isAction) LavenderGlow else PureWhite,
+                                        border = BorderStroke(1.dp, ObsidianBorder),
+                                        shadowElevation = 6.dp,
+                                        modifier = Modifier
+                                            .size(70.dp)
+                                            .testTag("vault_key_$key")
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            if (key == "⌫") {
+                                                Icon(Icons.AutoMirrored.Filled.Backspace, contentDescription = "Backspace")
+                                            } else {
+                                                Text(key, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -1264,9 +1430,23 @@ private fun VaultLockedContent(
                 }
             }
 
-            Spacer(Modifier.height(18.dp))
+            if (canTogglePinMode) {
+                Spacer(Modifier.height(14.dp))
+                TextButton(
+                    onClick = onTogglePinMode,
+                    modifier = Modifier.testTag("vault_toggle_pin_mode_btn")
+                ) {
+                    Text(
+                        text = if (state.forcePinMode) "Use $preferredMethodLabel instead" else "Switch to PIN (or Decoy PIN)",
+                        color = CyberCyan,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(8.dp))
             TextButton(onClick = onOpenRecovery) {
-                Text("Forgot PIN? / Master Recovery", color = NeonViolet, fontWeight = FontWeight.SemiBold)
+                Text("Forgot Credential? / Master Recovery", color = NeonViolet, fontWeight = FontWeight.SemiBold)
             }
         }
     }

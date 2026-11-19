@@ -1,5 +1,6 @@
 package com.example.service
 
+import android.app.AppOpsManager
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
@@ -11,12 +12,15 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
 import android.os.IBinder
+import android.os.Process
 import android.provider.Settings
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.example.R
 import com.example.data.db.AppGuardDatabase
 import com.example.domain.model.SecuritySettings
 import com.example.domain.repository.AppLockRepository
+import com.example.domain.repository.LockedAppBackupCodec
 import com.example.presentation.screens.lock.LockActivity
 import com.example.util.SecurePreferences
 import kotlinx.coroutines.CoroutineScope
@@ -51,6 +55,7 @@ class AppLockService : Service() {
     }
 
     companion object {
+        private const val TAG = "AppLockService"
         val unlockedApps: MutableSet<String> = LockSessionTracker("com.example").unlockedApps
         val lastBackgroundTime: MutableMap<String, Long> = LockSessionTracker("com.example").lastBackgroundTime
 
@@ -63,10 +68,57 @@ class AppLockService : Service() {
             activeTracker?.markAppUnlocked(packageName)
         }
 
+        fun markPackageInstallersUnlocked() {
+            LockSessionTracker.INSTALLER_PACKAGES.forEach { pkg ->
+                markAppUnlocked(pkg)
+            }
+        }
+
         fun clearUnlockedSessions() {
             unlockedApps.clear()
             lastBackgroundTime.clear()
             activeTracker?.onScreenOff()
+        }
+
+        fun hasUsageStatsPermission(context: Context): Boolean {
+            return try {
+                val appOps = context.getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
+                val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    appOps.unsafeCheckOpNoThrow(
+                        AppOpsManager.OPSTR_GET_USAGE_STATS,
+                        Process.myUid(),
+                        context.packageName
+                    )
+                } else {
+                    @Suppress("DEPRECATION")
+                    appOps.checkOpNoThrow(
+                        AppOpsManager.OPSTR_GET_USAGE_STATS,
+                        Process.myUid(),
+                        context.packageName
+                    )
+                }
+                mode == AppOpsManager.MODE_ALLOWED
+            } catch (_: Exception) {
+                false
+            }
+        }
+
+        fun startIfPermitted(context: Context): Boolean {
+            if (!Settings.canDrawOverlays(context) || !hasUsageStatsPermission(context)) {
+                return false
+            }
+            return try {
+                val serviceIntent = Intent(context, AppLockService::class.java)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(serviceIntent)
+                } else {
+                    context.startService(serviceIntent)
+                }
+                true
+            } catch (e: Exception) {
+                Log.w(TAG, "Deferred starting AppLockService: ${e.message}")
+                false
+            }
         }
     }
 
@@ -74,10 +126,17 @@ class AppLockService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        val dao = AppGuardDatabase.getDatabase(this).appLockDao()
-        repository = AppLockRepository(dao)
         securePrefs = SecurePreferences.getInstance(this)
+        val dao = AppGuardDatabase.getDatabase(this).appLockDao()
+        repository = AppLockRepository(dao, securePrefs)
         currentSettings = securePrefs.currentSettings()
+
+        // Prime locked packages immediately from encrypted backup so there is zero gap after update/boot
+        val backedUpApps = LockedAppBackupCodec.decode(securePrefs.getLockedAppsBackupJson())
+        if (backedUpApps.isNotEmpty()) {
+            cachedLockedPackages = backedUpApps.associate { it.packageName to it.appLabel }
+        }
+
         tracker = LockSessionTracker(
             ownPackageName = packageName,
             unlockedApps = unlockedApps,
@@ -88,6 +147,7 @@ class AppLockService : Service() {
         registerReceiver(screenOffReceiver, IntentFilter(Intent.ACTION_SCREEN_OFF))
 
         serviceScope.launch {
+            repository.restoreLockedAppsIfNeeded(this@AppLockService)
             repository.allLockedApps.collect { apps ->
                 cachedLockedPackages = apps.filter { it.isLocked }.associate { it.packageName to it.appLabel }
             }
@@ -142,10 +202,17 @@ class AppLockService : Service() {
 
     private fun startMonitoring() {
         val usageStatsManager = getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+        val powerManager = getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager
         serviceScope.launch {
             while (isRunning) {
+                if (powerManager?.isInteractive == false) {
+                    delay(450)
+                    continue
+                }
+
                 val endTime = System.currentTimeMillis()
-                val beginTime = endTime - 5_000L
+                val lookbackMs = if (tracker.currentForegroundPackage == null) 120_000L else 5_000L
+                val beginTime = endTime - lookbackMs
                 val events = usageStatsManager.queryEvents(beginTime, endTime)
                 val event = UsageEvents.Event()
                 var latestPackage = tracker.currentForegroundPackage
@@ -155,6 +222,16 @@ class AppLockService : Service() {
                     if (event.eventType == UsageEvents.Event.ACTIVITY_RESUMED) {
                         latestPackage = event.packageName
                     }
+                }
+
+                // Fallback after long idle/screen-off when no recent ACTIVITY_RESUMED event fell in the window
+                if (latestPackage == null) {
+                    val stats = usageStatsManager.queryUsageStats(
+                        UsageStatsManager.INTERVAL_DAILY,
+                        endTime - 3_600_000L,
+                        endTime
+                    )
+                    latestPackage = stats?.maxByOrNull { it.lastTimeUsed }?.packageName
                 }
 
                 if (latestPackage != null && latestPackage != tracker.currentForegroundPackage) {

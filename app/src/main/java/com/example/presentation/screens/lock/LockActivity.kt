@@ -30,11 +30,17 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.LockOpen
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -50,6 +56,10 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -62,7 +72,9 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.domain.model.SecuritySettings
+import com.example.domain.model.UnlockMethod
 import com.example.service.AppLockService
+import com.example.ui.components.PatternLockView
 import com.example.ui.components.tactileScale
 import com.example.ui.theme.*
 import com.example.util.AlarmAlertHelper
@@ -186,7 +198,8 @@ class LockActivity : FragmentActivity() {
         currentTarget = LockTarget(
             packageName = targetPackage,
             appLabel = appLabel,
-            isHidden = isHidden
+            isHidden = isHidden,
+            instanceNonce = System.nanoTime()
         )
     }
 }
@@ -212,14 +225,24 @@ fun LockScreenContent(
 
     BackHandler { goToHome() }
 
-    var stage by remember(target.packageName, target.isHidden, settings.scrambleKeypadEnabled) {
+    var stage by remember(
+        target.packageName,
+        target.isHidden,
+        target.instanceNonce,
+        settings.scrambleKeypadEnabled,
+        settings.unlockMethod,
+        settings.masterPattern,
+        settings.masterPassword
+    ) {
         mutableStateOf(LockStateMachine.revealInitial(target, settings))
     }
-    var recoveryState by remember { mutableStateOf<LockRecoveryDialogState>(LockRecoveryDialogState.Hidden) }
+    var recoveryState by remember(target.packageName, target.instanceNonce) {
+        mutableStateOf<LockRecoveryDialogState>(LockRecoveryDialogState.Hidden)
+    }
     val securityQuestion = remember { securePrefs.getSecurityQuestion() }
 
     val offsetX = remember { Animatable(0f) }
-    val failedCount = (stage as? LockScreenStage.PinAuthentication)?.failedAttempts ?: 0
+    val failedCount = stage.currentFailedAttempts
 
     LaunchedEffect(failedCount) {
         if (failedCount > 0) {
@@ -257,7 +280,7 @@ fun LockScreenContent(
         }
     }
 
-    val showBiometricPrompt = remember(activity, target.appLabel) {
+    val showBiometricPrompt = remember(activity, target.appLabel, settings.unlockMethod) {
         {
             val executor = ContextCompat.getMainExecutor(activity)
             val biometricPrompt = BiometricPrompt(
@@ -269,12 +292,20 @@ fun LockScreenContent(
                         if (errorCode != BiometricPrompt.ERROR_USER_CANCELED &&
                             errorCode != BiometricPrompt.ERROR_NEGATIVE_BUTTON
                         ) {
-                            val current = stage
-                            if (current is LockScreenStage.PinAuthentication) {
-                                stage = current.copy(
+                            stage = when (val current = stage) {
+                                is LockScreenStage.PinAuthentication -> current.copy(
                                     errorMessage = errString.toString(),
                                     biometricState = BiometricAuthState.IDLE
                                 )
+                                is LockScreenStage.PatternAuthentication -> current.copy(
+                                    errorMessage = errString.toString(),
+                                    biometricState = BiometricAuthState.IDLE
+                                )
+                                is LockScreenStage.PasswordAuthentication -> current.copy(
+                                    errorMessage = errString.toString(),
+                                    biometricState = BiometricAuthState.IDLE
+                                )
+                                else -> current
                             }
                         }
                     }
@@ -293,10 +324,16 @@ fun LockScreenContent(
                 }
             )
 
+            val negativeLabel = when (settings.unlockMethod) {
+                UnlockMethod.PIN -> "Use PIN"
+                UnlockMethod.PATTERN -> "Use Pattern"
+                UnlockMethod.PASSWORD -> "Use Password"
+            }
+
             val promptInfo = BiometricPrompt.PromptInfo.Builder()
                 .setTitle("Unlock DASMO LOCK")
                 .setSubtitle("Authenticate to access ${target.appLabel}")
-                .setNegativeButtonText("Use PIN")
+                .setNegativeButtonText(negativeLabel)
                 .build()
 
             biometricPrompt.authenticate(promptInfo)
@@ -308,12 +345,21 @@ fun LockScreenContent(
             BiometricManager.BIOMETRIC_SUCCESS
     }
 
+    LaunchedEffect(stage::class, target.instanceNonce) {
+        if (isBiometricAvailable &&
+            stage.isAuthInputStage &&
+            recoveryState is LockRecoveryDialogState.Hidden
+        ) {
+            showBiometricPrompt()
+        }
+    }
+
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner, stage::class) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME &&
                 isBiometricAvailable &&
-                stage is LockScreenStage.PinAuthentication &&
+                stage.isAuthInputStage &&
                 recoveryState is LockRecoveryDialogState.Hidden
             ) {
                 showBiometricPrompt()
@@ -325,6 +371,7 @@ fun LockScreenContent(
 
     AnimatedContent(
         targetState = stage,
+        contentKey = { it::class },
         transitionSpec = { fadeIn() togetherWith fadeOut() },
         label = "lock_stage_transition"
     ) { currentStage ->
@@ -340,10 +387,15 @@ fun LockScreenContent(
                 )
             }
 
-            is LockScreenStage.PinAuthentication, is LockScreenStage.Unlocked -> {
+            is LockScreenStage.PinAuthentication,
+            is LockScreenStage.PatternAuthentication,
+            is LockScreenStage.PasswordAuthentication,
+            is LockScreenStage.Unlocked -> {
                 val pinStage = currentStage as? LockScreenStage.PinAuthentication
-                val enteredLength = if (currentStage is LockScreenStage.Unlocked) 4 else pinStage?.enteredPin?.length ?: 0
+                val patternStage = currentStage as? LockScreenStage.PatternAuthentication
+                val passwordStage = currentStage as? LockScreenStage.PasswordAuthentication
                 val isUnlocked = currentStage is LockScreenStage.Unlocked
+                val errorText = currentStage.currentErrorMessage
 
                 Column(
                     modifier = Modifier
@@ -354,6 +406,8 @@ fun LockScreenContent(
                             )
                         )
                         .systemBarsPadding()
+                        .imePadding()
+                        .verticalScroll(rememberScrollState())
                         .padding(horizontal = 24.dp, vertical = 20.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
@@ -377,7 +431,7 @@ fun LockScreenContent(
                     } else {
                         Box(
                             modifier = Modifier
-                                .size(90.dp)
+                                .size(86.dp)
                                 .shadow(
                                     elevation = 18.dp,
                                     shape = RoundedCornerShape(24.dp),
@@ -396,7 +450,7 @@ fun LockScreenContent(
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(16.dp))
+                    Spacer(modifier = Modifier.height(14.dp))
 
                     Text(
                         text = target.appLabel,
@@ -406,151 +460,308 @@ fun LockScreenContent(
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "DASMO LOCK • Protected",
+                        text = when {
+                            isUnlocked -> "Access Granted"
+                            patternStage != null -> "Draw your unlock pattern"
+                            passwordStage != null -> "Enter your master password"
+                            else -> "DASMO LOCK • Enter Master PIN"
+                        },
                         style = MaterialTheme.typography.labelLarge,
                         color = NeonViolet
                     )
 
-                    Spacer(modifier = Modifier.height(28.dp))
+                    when {
+                        patternStage != null -> {
+                            Spacer(modifier = Modifier.height(18.dp))
+                            if (!errorText.isNullOrBlank()) {
+                                Text(
+                                    text = errorText,
+                                    color = CrimsonAlert,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    modifier = Modifier
+                                        .offset(x = offsetX.value.dp)
+                                        .testTag("lock_error_text")
+                                )
+                                Spacer(modifier = Modifier.height(10.dp))
+                            }
 
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(18.dp),
-                        modifier = Modifier
-                            .offset(x = offsetX.value.dp)
-                            .testTag("lock_pin_dots")
-                    ) {
-                        for (i in 0 until 4) {
-                            val isFilled = i < enteredLength
-                            Box(
+                            PatternLockView(
+                                isError = !errorText.isNullOrBlank(),
+                                resetKey = patternStage.failedAttempts to target.instanceNonce,
+                                testTag = "lock_pattern_pad",
                                 modifier = Modifier
-                                    .size(18.dp)
-                                    .clip(CircleShape)
-                                    .background(if (isFilled) NeonViolet else ObsidianSurfaceVariant)
-                                    .border(
-                                        width = 1.dp,
-                                        color = if (isFilled) PureWhite.copy(alpha = 0.7f) else ObsidianBorder,
-                                        shape = CircleShape
-                                    )
+                                    .fillMaxWidth(0.84f)
+                                    .offset(x = offsetX.value.dp),
+                                onPatternStart = {
+                                    stage = LockStateMachine.onPatternStarted(stage)
+                                },
+                                onPatternComplete = { nodes ->
+                                    val res = LockStateMachine.onPatternCompleted(stage, nodes, settings)
+                                    stage = res.stage
+                                    handleEffects(res.effects)
+                                }
                             )
-                        }
-                    }
 
-                    val errorText = pinStage?.errorMessage
-                    if (!errorText.isNullOrBlank()) {
-                        Spacer(modifier = Modifier.height(14.dp))
-                        Text(
-                            text = errorText,
-                            color = CrimsonAlert,
-                            style = MaterialTheme.typography.bodySmall,
-                            fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.testTag("lock_error_text")
-                        )
-                    }
-
-                    if (settings.scrambleKeypadEnabled || settings.dynamicTimePinEnabled) {
-                        Spacer(modifier = Modifier.height(14.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            if (settings.scrambleKeypadEnabled) {
-                                Surface(
-                                    color = ContainerPurple,
-                                    shape = CircleShape,
-                                    border = BorderStroke(1.dp, ElectricPurple.copy(alpha = 0.6f))
+                            if (isBiometricAvailable) {
+                                Spacer(modifier = Modifier.height(14.dp))
+                                OutlinedButton(
+                                    onClick = { showBiometricPrompt() },
+                                    border = BorderStroke(1.dp, ElectricPurple.copy(alpha = 0.7f)),
+                                    shape = RoundedCornerShape(14.dp),
+                                    modifier = Modifier
+                                        .height(48.dp)
+                                        .testTag("lock_biometric_btn")
                                 ) {
-                                    Text(
-                                        "Anti-Peep Keypad",
-                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = LavenderGlow
-                                    )
-                                }
-                            }
-                            if (settings.dynamicTimePinEnabled) {
-                                Surface(
-                                    color = ContainerPurple,
-                                    shape = CircleShape,
-                                    border = BorderStroke(1.dp, ElectricPurple.copy(alpha = 0.6f))
-                                ) {
-                                    Text(
-                                        "Time PIN Active",
-                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = LavenderGlow
-                                    )
+                                    Icon(Icons.Default.Fingerprint, contentDescription = null, tint = NeonViolet)
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text("Use Fingerprint / Face", color = LavenderGlow)
                                 }
                             }
                         }
-                    }
 
-                    Spacer(modifier = Modifier.height(26.dp))
-
-                    val digits = pinStage?.keypadDigits ?: LockScreenStage.DEFAULT_DIGITS
-                    val rows = remember(digits) {
-                        listOf(
-                            listOf(digits[0], digits[1], digits[2]),
-                            listOf(digits[3], digits[4], digits[5]),
-                            listOf(digits[6], digits[7], digits[8]),
-                            listOf("FP", digits[9], "<")
-                        )
-                    }
-
-                    rows.forEach { row ->
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(22.dp),
-                            modifier = Modifier.padding(vertical = 8.dp)
-                        ) {
-                            row.forEach { key ->
-                                if (key == "FP" && !isBiometricAvailable) {
-                                    Spacer(modifier = Modifier.size(72.dp))
+                        passwordStage != null -> {
+                            Spacer(modifier = Modifier.height(22.dp))
+                            OutlinedTextField(
+                                value = passwordStage.enteredPassword,
+                                onValueChange = { stage = LockStateMachine.onPasswordChanged(stage, it) },
+                                label = { Text("Master Password") },
+                                singleLine = true,
+                                isError = !errorText.isNullOrBlank(),
+                                visualTransformation = if (passwordStage.passwordVisible) {
+                                    VisualTransformation.None
                                 } else {
-                                    val isFp = key == "FP"
-                                    val isBack = key == "<"
-                                    val interactionSource = remember { MutableInteractionSource() }
-                                    val pressed by interactionSource.collectIsPressedAsState()
-
-                                    Surface(
-                                        onClick = {
-                                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                            when (key) {
-                                                "<" -> stage = LockStateMachine.onBackspacePressed(stage)
-                                                "FP" -> showBiometricPrompt()
-                                                else -> {
-                                                    val res = LockStateMachine.onDigitPressed(stage, key, settings)
-                                                    stage = res.stage
-                                                    handleEffects(res.effects)
-                                                }
-                                            }
-                                        },
-                                        interactionSource = interactionSource,
-                                        modifier = Modifier
-                                            .size(72.dp)
-                                            .tactileScale(pressed = pressed, pressedScale = 0.9f)
-                                            .testTag("lock_key_$key"),
-                                        shape = CircleShape,
-                                        color = when {
-                                            isFp -> ContainerPurple
-                                            isBack -> ObsidianElevated
-                                            else -> ObsidianSurface
-                                        },
-                                        contentColor = if (isFp) NeonViolet else PureWhite,
-                                        border = BorderStroke(
-                                            1.dp,
-                                            if (isFp) ElectricPurple else ObsidianBorder
-                                        ),
-                                        shadowElevation = 6.dp
+                                    PasswordVisualTransformation()
+                                },
+                                keyboardOptions = KeyboardOptions(
+                                    keyboardType = KeyboardType.Password,
+                                    imeAction = ImeAction.Done
+                                ),
+                                keyboardActions = KeyboardActions(
+                                    onDone = {
+                                        val res = LockStateMachine.onPasswordSubmitted(stage, settings)
+                                        stage = res.stage
+                                        handleEffects(res.effects)
+                                    }
+                                ),
+                                trailingIcon = {
+                                    IconButton(
+                                        onClick = { stage = LockStateMachine.onTogglePasswordVisibility(stage) },
+                                        modifier = Modifier.size(48.dp)
                                     ) {
-                                        Box(contentAlignment = Alignment.Center) {
-                                            if (isFp) {
-                                                Icon(
-                                                    imageVector = Icons.Default.Fingerprint,
-                                                    contentDescription = "Biometric",
-                                                    modifier = Modifier.size(32.dp)
-                                                )
+                                        Icon(
+                                            imageVector = if (passwordStage.passwordVisible) {
+                                                Icons.Default.VisibilityOff
                                             } else {
-                                                Text(
-                                                    text = key,
-                                                    fontSize = 24.sp,
-                                                    fontWeight = FontWeight.SemiBold
-                                                )
+                                                Icons.Default.Visibility
+                                            },
+                                            contentDescription = if (passwordStage.passwordVisible) "Hide Password" else "Show Password",
+                                            tint = NeonViolet
+                                        )
+                                    }
+                                },
+                                shape = RoundedCornerShape(16.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .widthIn(max = 360.dp)
+                                    .offset(x = offsetX.value.dp)
+                                    .testTag("lock_password_input")
+                            )
+
+                            if (!errorText.isNullOrBlank()) {
+                                Spacer(modifier = Modifier.height(10.dp))
+                                Text(
+                                    text = errorText,
+                                    color = CrimsonAlert,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    modifier = Modifier.testTag("lock_error_text")
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.height(18.dp))
+                            Button(
+                                onClick = {
+                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    val res = LockStateMachine.onPasswordSubmitted(stage, settings)
+                                    stage = res.stage
+                                    handleEffects(res.effects)
+                                },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = ElectricPurple,
+                                    contentColor = PureWhite
+                                ),
+                                shape = RoundedCornerShape(16.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .widthIn(max = 360.dp)
+                                    .height(52.dp)
+                                    .testTag("lock_password_submit_btn")
+                            ) {
+                                Text("Unlock ${target.appLabel}", fontWeight = FontWeight.Bold)
+                            }
+
+                            if (isBiometricAvailable) {
+                                Spacer(modifier = Modifier.height(12.dp))
+                                OutlinedButton(
+                                    onClick = { showBiometricPrompt() },
+                                    border = BorderStroke(1.dp, ElectricPurple.copy(alpha = 0.7f)),
+                                    shape = RoundedCornerShape(14.dp),
+                                    modifier = Modifier
+                                        .height(48.dp)
+                                        .testTag("lock_biometric_btn")
+                                ) {
+                                    Icon(Icons.Default.Fingerprint, contentDescription = null, tint = NeonViolet)
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text("Use Fingerprint / Face", color = LavenderGlow)
+                                }
+                            }
+                        }
+
+                        else -> {
+                            val enteredLength = if (isUnlocked) 4 else pinStage?.enteredPin?.length ?: 0
+
+                            Spacer(modifier = Modifier.height(26.dp))
+
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(18.dp),
+                                modifier = Modifier
+                                    .offset(x = offsetX.value.dp)
+                                    .testTag("lock_pin_dots")
+                            ) {
+                                for (i in 0 until 4) {
+                                    val isFilled = i < enteredLength
+                                    Box(
+                                        modifier = Modifier
+                                            .size(18.dp)
+                                            .clip(CircleShape)
+                                            .background(if (isFilled) NeonViolet else ObsidianSurfaceVariant)
+                                            .border(
+                                                width = 1.dp,
+                                                color = if (isFilled) PureWhite.copy(alpha = 0.7f) else ObsidianBorder,
+                                                shape = CircleShape
+                                            )
+                                    )
+                                }
+                            }
+
+                            if (!errorText.isNullOrBlank()) {
+                                Spacer(modifier = Modifier.height(14.dp))
+                                Text(
+                                    text = errorText,
+                                    color = CrimsonAlert,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    modifier = Modifier.testTag("lock_error_text")
+                                )
+                            }
+
+                            if (settings.scrambleKeypadEnabled || settings.dynamicTimePinEnabled) {
+                                Spacer(modifier = Modifier.height(14.dp))
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    if (settings.scrambleKeypadEnabled) {
+                                        Surface(
+                                            color = ContainerPurple,
+                                            shape = CircleShape,
+                                            border = BorderStroke(1.dp, ElectricPurple.copy(alpha = 0.6f))
+                                        ) {
+                                            Text(
+                                                "Anti-Peep Keypad",
+                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = LavenderGlow
+                                            )
+                                        }
+                                    }
+                                    if (settings.dynamicTimePinEnabled) {
+                                        Surface(
+                                            color = ContainerPurple,
+                                            shape = CircleShape,
+                                            border = BorderStroke(1.dp, ElectricPurple.copy(alpha = 0.6f))
+                                        ) {
+                                            Text(
+                                                "Time PIN Active",
+                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = LavenderGlow
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(24.dp))
+
+                            val digits = pinStage?.keypadDigits ?: LockScreenStage.DEFAULT_DIGITS
+                            val rows = remember(digits) {
+                                listOf(
+                                    listOf(digits[0], digits[1], digits[2]),
+                                    listOf(digits[3], digits[4], digits[5]),
+                                    listOf(digits[6], digits[7], digits[8]),
+                                    listOf("FP", digits[9], "<")
+                                )
+                            }
+
+                            rows.forEach { row ->
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(22.dp),
+                                    modifier = Modifier.padding(vertical = 8.dp)
+                                ) {
+                                    row.forEach { key ->
+                                        if (key == "FP" && !isBiometricAvailable) {
+                                            Spacer(modifier = Modifier.size(72.dp))
+                                        } else {
+                                            val isFp = key == "FP"
+                                            val isBack = key == "<"
+                                            val interactionSource = remember { MutableInteractionSource() }
+                                            val pressed by interactionSource.collectIsPressedAsState()
+
+                                            Surface(
+                                                onClick = {
+                                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                    when (key) {
+                                                        "<" -> stage = LockStateMachine.onBackspacePressed(stage)
+                                                        "FP" -> showBiometricPrompt()
+                                                        else -> {
+                                                            val res = LockStateMachine.onDigitPressed(stage, key, settings)
+                                                            stage = res.stage
+                                                            handleEffects(res.effects)
+                                                        }
+                                                    }
+                                                },
+                                                interactionSource = interactionSource,
+                                                modifier = Modifier
+                                                    .size(72.dp)
+                                                    .tactileScale(pressed = pressed, pressedScale = 0.9f)
+                                                    .testTag("lock_key_$key"),
+                                                shape = CircleShape,
+                                                color = when {
+                                                    isFp -> ContainerPurple
+                                                    isBack -> ObsidianElevated
+                                                    else -> ObsidianSurface
+                                                },
+                                                contentColor = if (isFp) NeonViolet else PureWhite,
+                                                border = BorderStroke(
+                                                    1.dp,
+                                                    if (isFp) ElectricPurple else ObsidianBorder
+                                                ),
+                                                shadowElevation = 6.dp
+                                            ) {
+                                                Box(contentAlignment = Alignment.Center) {
+                                                    if (isFp) {
+                                                        Icon(
+                                                            imageVector = Icons.Default.Fingerprint,
+                                                            contentDescription = "Biometric",
+                                                            modifier = Modifier.size(32.dp)
+                                                        )
+                                                    } else {
+                                                        Text(
+                                                            text = key,
+                                                            fontSize = 24.sp,
+                                                            fontWeight = FontWeight.SemiBold
+                                                        )
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -566,7 +777,11 @@ fun LockScreenContent(
                         modifier = Modifier.testTag("lock_forgot_pin_btn")
                     ) {
                         Text(
-                            text = "Forgot PIN? / Emergency Recovery",
+                            text = when (settings.unlockMethod) {
+                                UnlockMethod.PIN -> "Forgot PIN? / Emergency Recovery"
+                                UnlockMethod.PATTERN -> "Forgot Pattern? / Emergency Recovery"
+                                UnlockMethod.PASSWORD -> "Forgot Password? / Emergency Recovery"
+                            },
                             color = NeonViolet,
                             style = MaterialTheme.typography.bodySmall,
                             fontWeight = FontWeight.SemiBold

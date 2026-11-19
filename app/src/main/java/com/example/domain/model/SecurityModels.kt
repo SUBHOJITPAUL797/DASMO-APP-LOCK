@@ -47,8 +47,17 @@ sealed interface AutoLockPolicy {
     }
 }
 
+enum class UnlockMethod(val label: String, val subtitle: String) {
+    PIN("PIN", "4-digit numeric code"),
+    PATTERN("Pattern", "3×3 connect dots"),
+    PASSWORD("Password", "Alphanumeric phrase")
+}
+
 data class SecuritySettings(
     val masterPin: String = "1234",
+    val unlockMethod: UnlockMethod = UnlockMethod.PIN,
+    val masterPattern: String = "",
+    val masterPassword: String = "",
     val decoyPin: String = "",
     val dynamicTimePinEnabled: Boolean = false,
     val scrambleKeypadEnabled: Boolean = false,
@@ -69,6 +78,105 @@ sealed interface PinMatchResult {
 sealed interface PinValidationResult {
     data object Valid : PinValidationResult
     data class Invalid(val message: String) : PinValidationResult
+}
+
+object PatternValidator {
+    const val MIN_NODES = 4
+    const val GRID_SIZE = 3
+
+    fun encode(nodes: List<Int>): String = nodes.joinToString("-")
+
+    fun decode(encoded: String): List<Int> {
+        if (encoded.isBlank()) return emptyList()
+        return encoded.split("-").mapNotNull { it.trim().toIntOrNull() }
+    }
+
+    fun isValidPattern(nodes: List<Int>): Boolean {
+        return nodes.size >= MIN_NODES &&
+            nodes.all { it in 0..8 } &&
+            nodes.distinct().size == nodes.size
+    }
+
+    fun isValidEncodedPattern(encoded: String): Boolean {
+        return isValidPattern(decode(encoded))
+    }
+
+    /**
+     * Appends [nextNode] to [current] while automatically including any unvisited
+     * collinear midpoint node on the 3×3 grid (e.g. 0 -> 2 includes 1; 0 -> 8 includes 4).
+     */
+    fun appendNodeWithMidpoint(current: List<Int>, nextNode: Int): List<Int> {
+        if (nextNode !in 0..8 || current.contains(nextNode)) return current
+        val last = current.lastOrNull() ?: return listOf(nextNode)
+        val c1 = last % GRID_SIZE
+        val r1 = last / GRID_SIZE
+        val c2 = nextNode % GRID_SIZE
+        val r2 = nextNode / GRID_SIZE
+        val updated = current.toMutableList()
+        if ((c1 + c2) % 2 == 0 && (r1 + r2) % 2 == 0) {
+            val midCol = (c1 + c2) / 2
+            val midRow = (r1 + r2) / 2
+            val midNode = midRow * GRID_SIZE + midCol
+            if (midNode != last && midNode != nextNode && !updated.contains(midNode)) {
+                updated.add(midNode)
+            }
+        }
+        updated.add(nextNode)
+        return updated
+    }
+
+    fun validatePatternChange(
+        newPattern: String,
+        confirmPattern: String,
+        isPatternActive: Boolean,
+        existingSavedPattern: String
+    ): PinValidationResult {
+        if (newPattern.isEmpty() && confirmPattern.isEmpty()) {
+            return if (isPatternActive && !isValidEncodedPattern(existingSavedPattern)) {
+                PinValidationResult.Invalid("Draw and confirm a pattern (at least 4 dots) to enable Pattern lock")
+            } else {
+                PinValidationResult.Valid
+            }
+        }
+        if (!isValidEncodedPattern(newPattern)) {
+            return PinValidationResult.Invalid("Pattern must connect at least $MIN_NODES unique dots")
+        }
+        if (newPattern != confirmPattern) {
+            return PinValidationResult.Invalid("Confirmation pattern does not match")
+        }
+        return PinValidationResult.Valid
+    }
+}
+
+object PasswordValidator {
+    const val MIN_LENGTH = 4
+    const val MAX_LENGTH = 32
+
+    fun isValidPassword(value: String): Boolean {
+        return value.length in MIN_LENGTH..MAX_LENGTH && value.isNotBlank()
+    }
+
+    fun validatePasswordChange(
+        newPassword: String,
+        confirmPassword: String,
+        isPasswordActive: Boolean,
+        existingSavedPassword: String
+    ): PinValidationResult {
+        if (newPassword.isEmpty() && confirmPassword.isEmpty()) {
+            return if (isPasswordActive && !isValidPassword(existingSavedPassword)) {
+                PinValidationResult.Invalid("Enter and confirm a password (min $MIN_LENGTH characters) to enable Password lock")
+            } else {
+                PinValidationResult.Valid
+            }
+        }
+        if (!isValidPassword(newPassword)) {
+            return PinValidationResult.Invalid("Password must be $MIN_LENGTH–$MAX_LENGTH characters (not blank)")
+        }
+        if (newPassword != confirmPassword) {
+            return PinValidationResult.Invalid("Passwords do not match")
+        }
+        return PinValidationResult.Valid
+    }
 }
 
 object PinValidator {
@@ -111,6 +219,23 @@ object PinValidator {
             if (enteredPin == time24 || enteredPin == time12) return true
         }
         return false
+    }
+
+    fun verifyAppUnlockPattern(
+        enteredNodes: List<Int>,
+        settings: SecuritySettings
+    ): Boolean {
+        if (settings.masterPattern.isBlank()) return false
+        if (!PatternValidator.isValidPattern(enteredNodes)) return false
+        return PatternValidator.encode(enteredNodes) == settings.masterPattern
+    }
+
+    fun verifyAppUnlockPassword(
+        enteredPassword: String,
+        settings: SecuritySettings
+    ): Boolean {
+        if (!PasswordValidator.isValidPassword(settings.masterPassword)) return false
+        return enteredPassword == settings.masterPassword
     }
 
     fun verifyVaultPin(

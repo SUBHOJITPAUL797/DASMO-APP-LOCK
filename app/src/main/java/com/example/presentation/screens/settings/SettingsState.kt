@@ -1,16 +1,30 @@
 package com.example.presentation.screens.settings
 
 import com.example.domain.model.AutoLockPolicy
+import com.example.domain.model.PasswordValidator
+import com.example.domain.model.PatternValidator
 import com.example.domain.model.PinValidationResult
 import com.example.domain.model.PinValidator
 import com.example.domain.model.SecuritySettings
 import com.example.domain.model.TimeUnitOption
+import com.example.domain.model.UnlockMethod
+
+object SecurityQuestions {
+    val DEFAULT_LIST = listOf(
+        "What was the name of your first school?",
+        "What is your mother's maiden name?",
+        "What city were you born in?",
+        "What was your childhood nickname?",
+        "What is your favorite book or movie?"
+    )
+}
 
 enum class SettingsTab(val label: String) {
-    SECURITY("Access & PIN"),
+    SECURITY("Access & Auth"),
     DECOY("Decoy Mode"),
     DISGUISE("Camouflage"),
-    AUTO_LOCK("Auto-Lock")
+    AUTO_LOCK("Auto-Lock"),
+    UPDATES("Updates")
 }
 
 sealed interface AutoLockDraftSelection {
@@ -18,11 +32,41 @@ sealed interface AutoLockDraftSelection {
     data class Custom(val numberInput: String, val unit: TimeUnitOption) : AutoLockDraftSelection
 }
 
+sealed interface SettingsModalState {
+    data object None : SettingsModalState
+    data object ConfirmDiscardChanges : SettingsModalState
+    data class ConfirmDisableUninstallProtection(
+        val pinOrMasterKey: String = "",
+        val useRecoveryInput: Boolean = false,
+        val error: String? = null
+    ) : SettingsModalState
+}
+
+enum class PatternDraftStep {
+    IDLE_OR_DRAW_NEW,
+    AWAITING_CONFIRM,
+    READY_TO_SAVE
+}
+
 data class SettingsDraftState(
     val activeTab: SettingsTab = SettingsTab.SECURITY,
+    val unlockMethod: UnlockMethod = UnlockMethod.PIN,
     val newPin: String = "",
     val confirmPin: String = "",
     val pinError: String? = null,
+    val savedMasterPattern: String = "",
+    val newPattern: String = "",
+    val confirmPattern: String = "",
+    val patternStep: PatternDraftStep = PatternDraftStep.IDLE_OR_DRAW_NEW,
+    val patternError: String? = null,
+    val savedMasterPassword: String = "",
+    val newPassword: String = "",
+    val confirmPassword: String = "",
+    val passwordError: String? = null,
+    val savedRecoveryQuestion: String = "",
+    val recoveryQuestion: String = SecurityQuestions.DEFAULT_LIST.first(),
+    val recoveryAnswerInput: String = "",
+    val recoveryError: String? = null,
     val decoyPinInput: String = "",
     val decoyPinError: String? = null,
     val dynamicTimePinEnabled: Boolean = false,
@@ -35,9 +79,17 @@ data class SettingsDraftState(
     val customTimeoutError: String? = null
 ) {
     fun hasUnsavedChanges(saved: SecuritySettings): Boolean {
-        val baseline = fromSettings(saved)
-        return newPin.isNotEmpty() ||
+        val baseline = fromSettings(saved, savedRecoveryQuestion)
+        val recoveryChanged = recoveryAnswerInput.isNotBlank() ||
+            (savedRecoveryQuestion.isNotBlank() && recoveryQuestion != savedRecoveryQuestion)
+        return unlockMethod != baseline.unlockMethod ||
+            newPin.isNotEmpty() ||
             confirmPin.isNotEmpty() ||
+            newPattern.isNotEmpty() ||
+            confirmPattern.isNotEmpty() ||
+            newPassword.isNotEmpty() ||
+            confirmPassword.isNotEmpty() ||
+            recoveryChanged ||
             decoyPinInput != baseline.decoyPinInput ||
             dynamicTimePinEnabled != baseline.dynamicTimePinEnabled ||
             scrambleKeypadEnabled != baseline.scrambleKeypadEnabled ||
@@ -49,7 +101,10 @@ data class SettingsDraftState(
     }
 
     companion object {
-        fun fromSettings(settings: SecuritySettings): SettingsDraftState {
+        fun fromSettings(
+            settings: SecuritySettings,
+            savedQuestion: String = ""
+        ): SettingsDraftState {
             val policy = AutoLockPolicy.fromMillis(settings.autoLockTimeoutMillis)
             val selection = when (policy) {
                 is AutoLockPolicy.Immediate -> AutoLockDraftSelection.Preset(0L)
@@ -60,6 +115,11 @@ data class SettingsDraftState(
                 )
             }
             return SettingsDraftState(
+                unlockMethod = settings.unlockMethod,
+                savedMasterPattern = settings.masterPattern,
+                savedMasterPassword = settings.masterPassword,
+                savedRecoveryQuestion = savedQuestion,
+                recoveryQuestion = savedQuestion.ifBlank { SecurityQuestions.DEFAULT_LIST.first() },
                 decoyPinInput = settings.decoyPin,
                 dynamicTimePinEnabled = settings.dynamicTimePinEnabled,
                 scrambleKeypadEnabled = settings.scrambleKeypadEnabled,
@@ -74,7 +134,11 @@ data class SettingsDraftState(
 }
 
 sealed interface SettingsSaveResult {
-    data class Valid(val updatedSettings: SecuritySettings) : SettingsSaveResult
+    data class Valid(
+        val updatedSettings: SecuritySettings,
+        val recoveryUpdate: Pair<String, String>? = null
+    ) : SettingsSaveResult
+
     data class Invalid(val nextDraft: SettingsDraftState) : SettingsSaveResult
 }
 
@@ -85,6 +149,9 @@ object SettingsValidator {
     ): SettingsSaveResult {
         val clearedDraft = draft.copy(
             pinError = null,
+            patternError = null,
+            passwordError = null,
+            recoveryError = null,
             decoyPinError = null,
             customTimeoutError = null
         )
@@ -105,6 +172,62 @@ object SettingsValidator {
                 )
             }
             PinValidationResult.Valid -> Unit
+        }
+
+        val effectivePattern = if (draft.confirmPattern.isNotEmpty()) {
+            draft.confirmPattern
+        } else {
+            currentSettings.masterPattern
+        }
+        when (val patternResult = PatternValidator.validatePatternChange(
+            newPattern = draft.newPattern,
+            confirmPattern = draft.confirmPattern,
+            isPatternActive = draft.unlockMethod == UnlockMethod.PATTERN,
+            existingSavedPattern = currentSettings.masterPattern
+        )) {
+            is PinValidationResult.Invalid -> {
+                return SettingsSaveResult.Invalid(
+                    clearedDraft.copy(
+                        activeTab = SettingsTab.SECURITY,
+                        patternError = patternResult.message
+                    )
+                )
+            }
+            PinValidationResult.Valid -> Unit
+        }
+
+        val effectivePassword = if (draft.newPassword.isNotEmpty()) {
+            draft.newPassword
+        } else {
+            currentSettings.masterPassword
+        }
+        when (val passwordResult = PasswordValidator.validatePasswordChange(
+            newPassword = draft.newPassword,
+            confirmPassword = draft.confirmPassword,
+            isPasswordActive = draft.unlockMethod == UnlockMethod.PASSWORD,
+            existingSavedPassword = currentSettings.masterPassword
+        )) {
+            is PinValidationResult.Invalid -> {
+                return SettingsSaveResult.Invalid(
+                    clearedDraft.copy(
+                        activeTab = SettingsTab.SECURITY,
+                        passwordError = passwordResult.message
+                    )
+                )
+            }
+            PinValidationResult.Valid -> Unit
+        }
+
+        if (draft.savedRecoveryQuestion.isNotBlank() &&
+            draft.recoveryQuestion != draft.savedRecoveryQuestion &&
+            draft.recoveryAnswerInput.isBlank()
+        ) {
+            return SettingsSaveResult.Invalid(
+                clearedDraft.copy(
+                    activeTab = SettingsTab.SECURITY,
+                    recoveryError = "Enter a new secret answer when changing your security question"
+                )
+            )
         }
 
         when (val decoyResult = PinValidator.validateDecoyPin(
@@ -139,9 +262,18 @@ object SettingsValidator {
             }
         }
 
+        val recoveryUpdate = if (draft.recoveryAnswerInput.isNotBlank()) {
+            draft.recoveryQuestion.trim() to draft.recoveryAnswerInput.trim()
+        } else {
+            null
+        }
+
         return SettingsSaveResult.Valid(
-            currentSettings.copy(
+            updatedSettings = currentSettings.copy(
+                unlockMethod = draft.unlockMethod,
                 masterPin = effectiveMasterPin,
+                masterPattern = effectivePattern,
+                masterPassword = effectivePassword,
                 decoyPin = draft.decoyPinInput,
                 dynamicTimePinEnabled = draft.dynamicTimePinEnabled,
                 scrambleKeypadEnabled = draft.scrambleKeypadEnabled,
@@ -150,7 +282,8 @@ object SettingsValidator {
                 calculatorDisguiseEnabled = draft.calculatorDisguiseEnabled,
                 uninstallProtectionEnabled = draft.uninstallProtectionEnabled,
                 autoLockTimeoutMillis = resolvedTimeoutMillis
-            )
+            ),
+            recoveryUpdate = recoveryUpdate
         )
     }
 }

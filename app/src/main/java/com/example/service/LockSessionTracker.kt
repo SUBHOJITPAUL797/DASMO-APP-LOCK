@@ -38,7 +38,7 @@ class LockSessionTracker(
         }
         currentForegroundPackage = targetPackageName
 
-        val isUninstallTarget = settings.uninstallProtectionEnabled && isPackageInstallerApp(targetPackageName)
+        val isUninstallTarget = settings.uninstallProtectionEnabled && isUninstallProtectedPackage(targetPackageName)
         val isHidden = settings.hiddenApps.contains(targetPackageName)
         val isLocked = lockedPackages.contains(targetPackageName)
 
@@ -79,17 +79,29 @@ class LockSessionTracker(
     }
 
     companion object {
-        private val INSTALLER_PACKAGES = setOf(
+        val INSTALLER_PACKAGES = setOf(
             "com.android.packageinstaller",
             "com.google.android.packageinstaller",
             "com.samsung.android.packageinstaller",
             "com.miui.packageinstaller",
             "com.coloros.packageinstaller",
             "com.oppo.packageinstaller",
+            "com.oplus.packageinstaller",
+            "com.oneplus.packageinstaller",
             "com.vivo.packageinstaller",
+            "com.transsion.packageinstaller",
             "com.sec.android.app.samsungapps"
         )
 
+        private val SYSTEM_SETTINGS_PACKAGES = setOf(
+            "com.android.settings"
+        )
+
         fun isPackageInstallerApp(pkg: String): Boolean = INSTALLER_PACKAGES.contains(pkg.lowercase())
+
+        fun isUninstallProtectedPackage(pkg: String): Boolean {
+            val lower = pkg.lowercase()
+            return INSTALLER_PACKAGES.contains(lower) || SYSTEM_SETTINGS_PACKAGES.contains(lower)
+        }
     }
 }

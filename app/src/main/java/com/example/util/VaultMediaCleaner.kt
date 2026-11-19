@@ -211,9 +211,9 @@ object VaultMediaCleaner {
             try {
                 val docId = DocumentsContract.getDocumentId(uri)
                 if (docId != null && docId.contains(":")) {
-                    val split = docId.split(":")
+                    val split = docId.split(":", limit = 2)
                     val type = split[0]
-                    val rest = split[1]
+                    val rest = split.getOrElse(1) { "" }
 
                     if (type.equals("primary", ignoreCase = true)) {
                         candidatePath = "${Environment.getExternalStorageDirectory().absolutePath}/$rest"

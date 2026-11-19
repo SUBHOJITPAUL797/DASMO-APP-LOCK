@@ -155,6 +155,8 @@ fun AppIcon(packageName: String, packageManager: PackageManager) {
 fun AppGuardHomeScreen(
     repository: AppLockRepository,
     context: Context,
+    shouldRequestStartupPermissions: Boolean = true,
+    onStartupPermissionsRequested: () -> Unit = {},
     onNavigateToIntruders: () -> Unit,
     onNavigateToVault: () -> Unit,
     onNavigateToSettings: () -> Unit,
@@ -226,12 +228,15 @@ fun AppGuardHomeScreen(
                 )
             }.sortedBy { it.label.lowercase() }
         }
-        if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
-            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
-        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) {
-            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        if (shouldRequestStartupPermissions) {
+            onStartupPermissionsRequested()
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+            ) {
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
         }
     }
 
@@ -240,31 +245,10 @@ fun AppGuardHomeScreen(
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 refreshCounts()
-                val appOps = context.getSystemService(Context.APP_OPS_SERVICE) as android.app.AppOpsManager
-                val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    appOps.unsafeCheckOpNoThrow(
-                        android.app.AppOpsManager.OPSTR_GET_USAGE_STATS,
-                        android.os.Process.myUid(),
-                        context.packageName
-                    )
-                } else {
-                    @Suppress("DEPRECATION")
-                    appOps.checkOpNoThrow(
-                        android.app.AppOpsManager.OPSTR_GET_USAGE_STATS,
-                        android.os.Process.myUid(),
-                        context.packageName
-                    )
-                }
-                isUsageStatsEnabled = mode == android.app.AppOpsManager.MODE_ALLOWED
+                isUsageStatsEnabled = AppLockService.hasUsageStatsPermission(context)
                 isOverlayEnabled = Settings.canDrawOverlays(context)
-
                 if (isUsageStatsEnabled && isOverlayEnabled) {
-                    val intent = Intent(context, AppLockService::class.java)
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        context.startForegroundService(intent)
-                    } else {
-                        context.startService(intent)
-                    }
+                    AppLockService.startIfPermitted(context)
                 }
             }
         }

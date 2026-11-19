@@ -33,7 +33,8 @@ data class CalculatorState(
     val expression: String = "",
     val firstOperand: Double? = null,
     val pendingOperator: CalcOperator? = null,
-    val phase: CalcInputPhase = CalcInputPhase.FRESH
+    val phase: CalcInputPhase = CalcInputPhase.FRESH,
+    val pinBuffer: String? = ""
 )
 
 sealed interface CalculatorAction {
@@ -66,19 +67,34 @@ object CalculatorStateMachine {
                 val digit = action.value.take(1)
                 if (digit !in "0".."9") return CalculatorStepOutcome(state)
                 val nextState = when (state.phase) {
-                    CalcInputPhase.FRESH, CalcInputPhase.RESULT_DISPLAYED, CalcInputPhase.ERROR -> {
+                    CalcInputPhase.RESULT_DISPLAYED, CalcInputPhase.ERROR -> {
                         CalculatorState(
                             display = digit,
                             expression = "",
                             firstOperand = null,
                             pendingOperator = null,
-                            phase = if (digit == "0") CalcInputPhase.FRESH else CalcInputPhase.ENTERING_FIRST
+                            phase = if (digit == "0") CalcInputPhase.FRESH else CalcInputPhase.ENTERING_FIRST,
+                            pinBuffer = digit
+                        )
+                    }
+                    CalcInputPhase.FRESH -> {
+                        val updatedPinBuffer = state.pinBuffer?.let { existing ->
+                            if (existing.length < 12) existing + digit else existing
+                        }
+                        CalculatorState(
+                            display = digit,
+                            expression = "",
+                            firstOperand = null,
+                            pendingOperator = null,
+                            phase = if (digit == "0") CalcInputPhase.FRESH else CalcInputPhase.ENTERING_FIRST,
+                            pinBuffer = updatedPinBuffer
                         )
                     }
                     CalcInputPhase.AWAITING_SECOND -> {
                         state.copy(
                             display = digit,
-                            phase = CalcInputPhase.ENTERING_SECOND
+                            phase = CalcInputPhase.ENTERING_SECOND,
+                            pinBuffer = null
                         )
                     }
                     CalcInputPhase.ENTERING_FIRST, CalcInputPhase.ENTERING_SECOND -> {
@@ -89,7 +105,14 @@ object CalculatorStateMachine {
                         } else {
                             state.display
                         }
-                        state.copy(display = updated)
+                        val updatedPinBuffer = if (state.phase == CalcInputPhase.ENTERING_FIRST) {
+                            state.pinBuffer?.let { existing ->
+                                if (existing.length < 12) existing + digit else existing
+                            }
+                        } else {
+                            null
+                        }
+                        state.copy(display = updated, pinBuffer = updatedPinBuffer)
                     }
                 }
                 CalculatorStepOutcome(nextState)
@@ -103,17 +126,23 @@ object CalculatorStateMachine {
                             expression = "",
                             firstOperand = null,
                             pendingOperator = null,
-                            phase = CalcInputPhase.ENTERING_FIRST
+                            phase = CalcInputPhase.ENTERING_FIRST,
+                            pinBuffer = null
                         )
                     }
                     CalcInputPhase.AWAITING_SECOND -> {
                         state.copy(
                             display = "0.",
-                            phase = CalcInputPhase.ENTERING_SECOND
+                            phase = CalcInputPhase.ENTERING_SECOND,
+                            pinBuffer = null
                         )
                     }
                     CalcInputPhase.ENTERING_FIRST, CalcInputPhase.ENTERING_SECOND -> {
-                        if (state.display.contains(".")) state else state.copy(display = "${state.display}.")
+                        if (state.display.contains(".")) {
+                            state.copy(pinBuffer = null)
+                        } else {
+                            state.copy(display = "${state.display}.", pinBuffer = null)
+                        }
                     }
                 }
                 CalculatorStepOutcome(nextState)
@@ -121,18 +150,18 @@ object CalculatorStateMachine {
 
             is CalculatorAction.ToggleSign -> {
                 if (state.phase == CalcInputPhase.ERROR || state.display == "0" || state.display == "0.") {
-                    return CalculatorStepOutcome(state)
+                    return CalculatorStepOutcome(state.copy(pinBuffer = null))
                 }
                 val toggled = if (state.display.startsWith("-")) state.display.drop(1) else "-${state.display}"
                 val nextPhase = if (state.phase == CalcInputPhase.RESULT_DISPLAYED) CalcInputPhase.ENTERING_FIRST else state.phase
-                CalculatorStepOutcome(state.copy(display = toggled, phase = nextPhase))
+                CalculatorStepOutcome(state.copy(display = toggled, phase = nextPhase, pinBuffer = null))
             }
 
             is CalculatorAction.Percent -> {
                 if (state.phase == CalcInputPhase.ERROR) return CalculatorStepOutcome(state)
                 val value = state.display.toDoubleOrNull() ?: return CalculatorStepOutcome(state)
                 val formatted = formatNumber(value / 100.0)
-                CalculatorStepOutcome(state.copy(display = formatted))
+                CalculatorStepOutcome(state.copy(display = formatted, pinBuffer = null))
             }
 
             is CalculatorAction.Operator -> {
@@ -150,7 +179,8 @@ object CalculatorStateMachine {
                             CalculatorState(
                                 display = "Error",
                                 expression = "${formatNumber(state.firstOperand)} ${state.pendingOperator.symbol} ${formatNumber(currentValue)}",
-                                phase = CalcInputPhase.ERROR
+                                phase = CalcInputPhase.ERROR,
+                                pinBuffer = null
                             )
                         )
                     }
@@ -161,7 +191,8 @@ object CalculatorStateMachine {
                             expression = "$formatted ${action.op.symbol}",
                             firstOperand = intermediate,
                             pendingOperator = action.op,
-                            phase = CalcInputPhase.AWAITING_SECOND
+                            phase = CalcInputPhase.AWAITING_SECOND,
+                            pinBuffer = null
                         )
                     )
                 }
@@ -179,16 +210,19 @@ object CalculatorStateMachine {
                         expression = "$formattedBase ${action.op.symbol}",
                         firstOperand = baseOperand,
                         pendingOperator = action.op,
-                        phase = CalcInputPhase.AWAITING_SECOND
+                        phase = CalcInputPhase.AWAITING_SECOND,
+                        pinBuffer = null
                     )
                 )
             }
 
             is CalculatorAction.Equals -> {
-                // Only unlock when entering the PIN cleanly (no pending arithmetic calculation)
+                // Only unlock when entering the PIN cleanly (no pending arithmetic calculation or math modifier)
+                val candidatePin = state.pinBuffer
                 val isPinAttempt = state.pendingOperator == null &&
+                    !candidatePin.isNullOrEmpty() &&
                     (state.phase == CalcInputPhase.ENTERING_FIRST || state.phase == CalcInputPhase.FRESH)
-                if (isPinAttempt && PinValidator.verifyAppUnlockPin(state.display, settings, now)) {
+                if (isPinAttempt && PinValidator.verifyAppUnlockPin(candidatePin, settings, now)) {
                     return CalculatorStepOutcome(
                         nextState = CalculatorState(),
                         unlocked = true
@@ -208,7 +242,8 @@ object CalculatorStateMachine {
                         CalculatorState(
                             display = "Error",
                             expression = expr,
-                            phase = CalcInputPhase.ERROR
+                            phase = CalcInputPhase.ERROR,
+                            pinBuffer = null
                         )
                     )
                 }
@@ -219,7 +254,8 @@ object CalculatorStateMachine {
                         expression = expr,
                         firstOperand = null,
                         pendingOperator = null,
-                        phase = CalcInputPhase.RESULT_DISPLAYED
+                        phase = CalcInputPhase.RESULT_DISPLAYED,
+                        pinBuffer = null
                     )
                 )
             }

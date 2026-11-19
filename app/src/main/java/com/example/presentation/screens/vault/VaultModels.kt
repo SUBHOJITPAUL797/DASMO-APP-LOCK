@@ -30,6 +30,10 @@ sealed interface VaultSelectionState {
 sealed interface VaultAccessState {
     data class Locked(
         val enteredPin: String = "",
+        val enteredPassword: String = "",
+        val passwordVisible: Boolean = false,
+        val patternAttemptCount: Int = 0,
+        val forcePinMode: Boolean = false,
         val errorMessage: String? = null
     ) : VaultAccessState
 

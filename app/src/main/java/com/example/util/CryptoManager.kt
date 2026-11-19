@@ -155,7 +155,8 @@ object CryptoManager {
         val iv = cipher.iv
 
         // Read source in chunks, updating progress
-        val rawBuffer = ByteArrayOutputStream(totalBytes.coerceAtLeast(1).toInt())
+        val initialCapacity = totalBytes.coerceIn(1L, 16L * 1024 * 1024).toInt()
+        val rawBuffer = ByteArrayOutputStream(initialCapacity)
         val buf = ByteArray(BUFFER_SIZE)
         var totalRead = 0L
         var n: Int
