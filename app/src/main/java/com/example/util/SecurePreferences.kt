@@ -61,6 +61,7 @@ class SecurePreferences(context: Context) {
             preventScreenshots = getString(KEY_PREVENT_SCREENSHOTS, "true") == "true",
             calculatorDisguiseEnabled = getString(KEY_CALCULATOR_DISGUISE, "false") == "true",
             uninstallProtectionEnabled = getString(KEY_UNINSTALL_PROTECTION, "false") == "true",
+            autoLockNewAppsEnabled = getString(KEY_AUTO_LOCK_NEW_APPS, "false") == "true",
             autoLockTimeoutMillis = getString(KEY_AUTO_LOCK_TIMEOUT, "300000").toLongOrNull()?.coerceAtLeast(0L) ?: 300_000L,
             hiddenApps = hiddenSet
         )
@@ -101,6 +102,7 @@ class SecurePreferences(context: Context) {
         encryptIntoEditor(editor, KEY_PREVENT_SCREENSHOTS, settings.preventScreenshots.toString())
         encryptIntoEditor(editor, KEY_CALCULATOR_DISGUISE, settings.calculatorDisguiseEnabled.toString())
         encryptIntoEditor(editor, KEY_UNINSTALL_PROTECTION, settings.uninstallProtectionEnabled.toString())
+        encryptIntoEditor(editor, KEY_AUTO_LOCK_NEW_APPS, settings.autoLockNewAppsEnabled.toString())
         encryptIntoEditor(editor, KEY_AUTO_LOCK_TIMEOUT, settings.autoLockTimeoutMillis.toString())
         encryptIntoEditor(editor, KEY_HIDDEN_APPS, settings.hiddenApps.joinToString(","))
         editor.apply()
@@ -194,6 +196,7 @@ class SecurePreferences(context: Context) {
         const val KEY_PREVENT_SCREENSHOTS = "prevent_screenshots"
         const val KEY_CALCULATOR_DISGUISE = "calculator_disguise"
         const val KEY_UNINSTALL_PROTECTION = "uninstall_protection"
+        const val KEY_AUTO_LOCK_NEW_APPS = "auto_lock_new_apps"
         const val KEY_AUTO_LOCK_TIMEOUT = "auto_lock_timeout"
         const val KEY_HIDDEN_APPS = "hidden_apps"
         const val KEY_LOCKED_APPS_BACKUP = "locked_apps_backup"
@@ -207,6 +210,7 @@ class SecurePreferences(context: Context) {
             KEY_SECURITY_ANSWER,
             KEY_DECOY_PIN,
             KEY_UNINSTALL_PROTECTION,
+            KEY_AUTO_LOCK_NEW_APPS,
             KEY_CALCULATOR_DISGUISE,
             KEY_AUTO_LOCK_TIMEOUT,
             KEY_DYNAMIC_TIME_PIN,

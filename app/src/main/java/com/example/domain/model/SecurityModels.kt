@@ -65,6 +65,7 @@ data class SecuritySettings(
     val preventScreenshots: Boolean = true,
     val calculatorDisguiseEnabled: Boolean = false,
     val uninstallProtectionEnabled: Boolean = false,
+    val autoLockNewAppsEnabled: Boolean = false,
     val autoLockTimeoutMillis: Long = 300_000L,
     val hiddenApps: Set<String> = emptySet()
 )

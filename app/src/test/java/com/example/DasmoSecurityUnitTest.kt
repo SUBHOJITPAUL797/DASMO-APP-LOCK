@@ -1,5 +1,6 @@
 package com.example
 
+import com.example.data.db.LockedAppEntity
 import com.example.domain.model.AutoLockPolicy
 import com.example.domain.model.PasswordValidator
 import com.example.domain.model.PatternValidator
@@ -9,6 +10,7 @@ import com.example.domain.model.PinValidator
 import com.example.domain.model.SecuritySettings
 import com.example.domain.model.TimeUnitOption
 import com.example.domain.model.UnlockMethod
+import com.example.presentation.screens.home.calculateSecurityHealthScore
 import com.example.presentation.screens.disguise.CalcInputPhase
 import com.example.presentation.screens.disguise.CalcOperator
 import com.example.presentation.screens.disguise.CalculatorAction
@@ -570,5 +572,47 @@ class DasmoSecurityUnitTest {
         val savedPass = SettingsValidator.validateAndBuild(validPassDraft, base) as SettingsSaveResult.Valid
         assertEquals(UnlockMethod.PASSWORD, savedPass.updatedSettings.unlockMethod)
         assertEquals("Obsidian#7", savedPass.updatedSettings.masterPassword)
+    }
+
+    @Test
+    fun `settings validator persists autoLockNewAppsEnabled toggle and detects unsaved changes`() {
+        val base = SecuritySettings(masterPin = "4321", autoLockNewAppsEnabled = false)
+        val initialDraft = SettingsDraftState.fromSettings(base)
+        assertFalse(initialDraft.hasUnsavedChanges(base))
+
+        val toggledDraft = initialDraft.copy(autoLockNewAppsEnabled = true)
+        assertTrue(toggledDraft.hasUnsavedChanges(base))
+
+        val saved = SettingsValidator.validateAndBuild(toggledDraft, base) as SettingsSaveResult.Valid
+        assertTrue(saved.updatedSettings.autoLockNewAppsEnabled)
+    }
+
+    @Test
+    fun `security health score rewards uninstall protection, custom credentials, and locked apps`() {
+        val defaultSettings = SecuritySettings(
+            masterPin = "1234",
+            unlockMethod = UnlockMethod.PIN,
+            uninstallProtectionEnabled = false,
+            scrambleKeypadEnabled = false,
+            dynamicTimePinEnabled = false,
+            preventScreenshots = false
+        )
+        val baseScore = calculateSecurityHealthScore(emptyList(), defaultSettings)
+        assertEquals(20, baseScore)
+
+        val hardenedSettings = defaultSettings.copy(
+            unlockMethod = UnlockMethod.PATTERN,
+            masterPattern = "0-1-2-5",
+            uninstallProtectionEnabled = true,
+            scrambleKeypadEnabled = true,
+            dynamicTimePinEnabled = true,
+            preventScreenshots = true
+        )
+        val lockedApps = listOf(
+            LockedAppEntity("com.android.settings", "Settings", isLocked = true),
+            LockedAppEntity("com.whatsapp", "WhatsApp", isLocked = true)
+        )
+        val maxScore = calculateSecurityHealthScore(lockedApps, hardenedSettings)
+        assertEquals(100, maxScore)
     }
 }

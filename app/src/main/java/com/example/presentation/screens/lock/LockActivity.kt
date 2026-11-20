@@ -37,7 +37,9 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AdminPanelSettings
 import androidx.compose.material.icons.filled.Fingerprint
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -77,10 +79,17 @@ import com.example.service.AppLockService
 import com.example.ui.components.PatternLockView
 import com.example.ui.components.tactileScale
 import com.example.ui.theme.*
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.core.graphics.drawable.toBitmap
+import com.example.presentation.screens.intruders.IntruderLogStore
+import com.example.service.LockSessionTracker
 import com.example.util.AlarmAlertHelper
 import com.example.util.MasterKeyManager
 import com.example.util.SecurePreferences
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import java.io.File
 
 sealed interface LockRecoveryDialogState {
@@ -88,7 +97,14 @@ sealed interface LockRecoveryDialogState {
     data class Visible(val input: String = "", val error: String? = null) : LockRecoveryDialogState
 }
 
-fun takeIntruderSelfie(activity: FragmentActivity) {
+fun takeIntruderSelfie(
+    activity: FragmentActivity,
+    targetPackageName: String = "",
+    targetAppLabel: String = "Locked App",
+    authMethodLabel: String = "PIN",
+    failedAttemptNumber: Int = 1,
+    isUninstallProtection: Boolean = false
+) {
     if (ContextCompat.checkSelfPermission(activity, android.Manifest.permission.CAMERA) !=
         android.content.pm.PackageManager.PERMISSION_GRANTED
     ) {
@@ -109,10 +125,9 @@ fun takeIntruderSelfie(activity: FragmentActivity) {
 
             cameraProvider.bindToLifecycle(activity as LifecycleOwner, cameraSelector, imageCapture)
 
-            val dir = activity.getDir("intruders", android.content.Context.MODE_PRIVATE)
-            if (!dir.exists()) dir.mkdirs()
-
-            val file = File(dir, "intruder_${System.currentTimeMillis()}.jpg")
+            val dir = IntruderLogStore.getIntruderDir(activity)
+            val captureTimestamp = System.currentTimeMillis()
+            val file = File(dir, "intruder_${captureTimestamp}.jpg")
             val outputOptions = ImageCapture.OutputFileOptions.Builder(file).build()
 
             Handler(Looper.getMainLooper()).postDelayed({
@@ -126,6 +141,15 @@ fun takeIntruderSelfie(activity: FragmentActivity) {
                         ContextCompat.getMainExecutor(activity),
                         object : ImageCapture.OnImageSavedCallback {
                             override fun onImageSaved(output: ImageCapture.OutputFileResults) {
+                                IntruderLogStore.saveMetadata(
+                                    photoFile = file,
+                                    targetPackageName = targetPackageName,
+                                    targetAppLabel = targetAppLabel,
+                                    authMethodLabel = authMethodLabel,
+                                    failedAttemptNumber = failedAttemptNumber,
+                                    isUninstallProtection = isUninstallProtection,
+                                    timestampMillis = captureTimestamp
+                                )
                                 cameraProvider.unbindAll()
                             }
 
@@ -270,11 +294,29 @@ fun LockScreenContent(
         }
     }
 
-    fun handleEffects(effects: List<LockEffect>) {
+    fun handleEffects(
+        effects: List<LockEffect>,
+        authMethodOverride: String? = null,
+        attemptCount: Int = stage.currentFailedAttempts
+    ) {
+        val resolvedMethod = authMethodOverride ?: when (stage) {
+            is LockScreenStage.PatternAuthentication -> "Pattern"
+            is LockScreenStage.PasswordAuthentication -> "Password"
+            else -> "PIN"
+        }
+        val isUninstallTarget = settings.uninstallProtectionEnabled &&
+            LockSessionTracker.isUninstallProtectedPackage(target.packageName)
         effects.forEach { effect ->
             when (effect) {
                 LockEffect.UnlockGranted -> Unit
-                LockEffect.TriggerIntruderCapture -> takeIntruderSelfie(activity)
+                LockEffect.TriggerIntruderCapture -> takeIntruderSelfie(
+                    activity = activity,
+                    targetPackageName = target.packageName,
+                    targetAppLabel = target.appLabel.ifBlank { "Locked App" },
+                    authMethodLabel = resolvedMethod,
+                    failedAttemptNumber = attemptCount.coerceAtLeast(1),
+                    isUninstallProtection = isUninstallTarget
+                )
                 LockEffect.TriggerBreakInSiren -> AlarmAlertHelper.playBreakInAlarm(activity)
             }
         }
@@ -319,7 +361,11 @@ fun LockScreenContent(
                         super.onAuthenticationFailed()
                         val outcome = LockStateMachine.onBiometricFailed(stage, settings)
                         stage = outcome.stage
-                        handleEffects(outcome.effects)
+                        handleEffects(
+                            effects = outcome.effects,
+                            authMethodOverride = "Biometric",
+                            attemptCount = outcome.stage.currentFailedAttempts
+                        )
                     }
                 }
             )
@@ -429,24 +475,78 @@ fun LockScreenContent(
                             }
                         }
                     } else {
-                        Box(
-                            modifier = Modifier
-                                .size(86.dp)
-                                .shadow(
-                                    elevation = 18.dp,
-                                    shape = RoundedCornerShape(24.dp),
-                                    ambientColor = ElectricPurple.copy(alpha = 0.6f),
-                                    spotColor = ElectricPurple.copy(alpha = 0.7f)
-                                )
-                                .clip(RoundedCornerShape(24.dp))
-                                .border(1.5.dp, NeonViolet.copy(alpha = 0.7f), RoundedCornerShape(24.dp))
-                        ) {
-                            Image(
-                                painter = painterResource(id = R.drawable.img_shield_3d),
-                                contentDescription = "DASMO Shield",
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier.fillMaxSize()
-                            )
+                        val isUninstallTarget = settings.uninstallProtectionEnabled &&
+                            LockSessionTracker.isUninstallProtectedPackage(target.packageName)
+                        var targetAppIcon by remember(target.packageName) { mutableStateOf<ImageBitmap?>(null) }
+
+                        LaunchedEffect(target.packageName, isUninstallTarget) {
+                            targetAppIcon = if (target.packageName.isNotBlank() && !isUninstallTarget) {
+                                withContext(Dispatchers.IO) {
+                                    try {
+                                        activity.packageManager.getApplicationIcon(target.packageName)
+                                            .toBitmap(width = 160, height = 160)
+                                            .asImageBitmap()
+                                    } catch (_: Exception) {
+                                        null
+                                    }
+                                }
+                            } else {
+                                null
+                            }
+                        }
+
+                        Box(modifier = Modifier.size(92.dp)) {
+                            Box(
+                                modifier = Modifier
+                                    .size(86.dp)
+                                    .align(Alignment.Center)
+                                    .shadow(
+                                        elevation = 18.dp,
+                                        shape = RoundedCornerShape(24.dp),
+                                        ambientColor = ElectricPurple.copy(alpha = 0.6f),
+                                        spotColor = ElectricPurple.copy(alpha = 0.7f)
+                                    )
+                                    .clip(RoundedCornerShape(24.dp))
+                                    .background(ObsidianElevated)
+                                    .border(1.5.dp, NeonViolet.copy(alpha = 0.7f), RoundedCornerShape(24.dp))
+                            ) {
+                                if (targetAppIcon != null) {
+                                    Image(
+                                        bitmap = targetAppIcon!!,
+                                        contentDescription = "${target.appLabel} Icon",
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .padding(10.dp)
+                                            .clip(RoundedCornerShape(16.dp))
+                                    )
+                                } else {
+                                    Image(
+                                        painter = painterResource(id = R.drawable.img_shield_3d),
+                                        contentDescription = "DASMO Shield",
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                }
+                            }
+
+                            Surface(
+                                shape = CircleShape,
+                                color = if (isUninstallTarget) CrimsonAlert else ElectricPurple,
+                                border = BorderStroke(2.dp, ObsidianBlack),
+                                modifier = Modifier
+                                    .size(30.dp)
+                                    .align(Alignment.BottomEnd)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(
+                                        imageVector = if (isUninstallTarget) Icons.Default.AdminPanelSettings else Icons.Default.Lock,
+                                        contentDescription = null,
+                                        tint = PureWhite,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
                         }
                     }
 

@@ -74,6 +74,15 @@
         </receiver>
 
         <receiver
+            android:name=".receiver.PackageInstallReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.PACKAGE_ADDED" />
+                <data android:scheme="package" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
             android:name=".receiver.DasmoDeviceAdminReceiver"
             android:description="@string/device_admin_description"
             android:label="DASMO Uninstall Protection"

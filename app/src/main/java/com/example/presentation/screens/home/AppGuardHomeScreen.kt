@@ -51,6 +51,7 @@ import com.example.R
 import com.example.data.db.LockedAppEntity
 import com.example.domain.model.SecuritySettings
 import com.example.domain.repository.AppLockRepository
+import com.example.presentation.screens.intruders.IntruderLogStore
 import com.example.presentation.screens.vault.VaultStorage
 import com.example.service.AppLockService
 import com.example.ui.components.Icon3DBadge
@@ -109,13 +110,16 @@ fun calculateSecurityHealthScore(
     lockedApps: List<LockedAppEntity>,
     settings: SecuritySettings
 ): Int {
-    var score = 30
+    var score = 20
     val hasSettingsLocked = lockedApps.any { it.isLocked && (it.packageName.contains("settings") || it.packageName.contains("vending")) }
-    if (hasSettingsLocked) score += 25
+    if (hasSettingsLocked) score += 20
     val hasSocialLocked = lockedApps.any { it.isLocked && isSocialApp(it.packageName, it.appLabel) }
     if (hasSocialLocked) score += 15
-    if (settings.scrambleKeypadEnabled) score += 10
-    if (settings.dynamicTimePinEnabled) score += 10
+    if (settings.uninstallProtectionEnabled) score += 15
+    val hasCustomAuth = settings.unlockMethod != com.example.domain.model.UnlockMethod.PIN || settings.masterPin != "1234"
+    if (hasCustomAuth) score += 10
+    if (settings.scrambleKeypadEnabled) score += 5
+    if (settings.dynamicTimePinEnabled) score += 5
     if (settings.preventScreenshots) score += 10
     return score.coerceIn(0, 100)
 }
@@ -173,6 +177,8 @@ fun AppGuardHomeScreen(
     val lockedApps by repository.allLockedApps.collectAsStateWithLifecycle(initialValue = emptyList())
     var isUsageStatsEnabled by remember { mutableStateOf(false) }
     var isOverlayEnabled by remember { mutableStateOf(false) }
+    var isBatteryUnrestricted by remember { mutableStateOf(true) }
+    var batteryBannerDismissed by remember { mutableStateOf(false) }
 
     var showSystemInAll by remember { mutableStateOf(true) }
     var searchQuery by remember { mutableStateOf("") }
@@ -184,8 +190,7 @@ fun AppGuardHomeScreen(
     fun refreshCounts() {
         coroutineScope.launch {
             val (iCount, vCount) = withContext(Dispatchers.IO) {
-                val intDir = context.getDir("intruders", Context.MODE_PRIVATE)
-                val intruders = intDir.listFiles()?.count { it.isFile } ?: 0
+                val intruders = IntruderLogStore.countIntruders(context)
                 val vault = VaultStorage.countRealVaultItems(context)
                 intruders to vault
             }
@@ -247,6 +252,12 @@ fun AppGuardHomeScreen(
                 refreshCounts()
                 isUsageStatsEnabled = AppLockService.hasUsageStatsPermission(context)
                 isOverlayEnabled = Settings.canDrawOverlays(context)
+                val pmPower = context.getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager
+                isBatteryUnrestricted = try {
+                    pmPower?.isIgnoringBatteryOptimizations(context.packageName) ?: true
+                } catch (_: Exception) {
+                    true
+                }
                 if (isUsageStatsEnabled && isOverlayEnabled) {
                     AppLockService.startIfPermitted(context)
                 }
@@ -451,6 +462,80 @@ fun AppGuardHomeScreen(
                 }
             }
 
+            if (isUsageStatsEnabled && isOverlayEnabled && !isBatteryUnrestricted && !batteryBannerDismissed) {
+                Tactile3DCard(
+                    highlighted = false,
+                    shape = RoundedCornerShape(18.dp),
+                    modifier = Modifier
+                        .padding(horizontal = 16.dp, vertical = 6.dp)
+                        .fillMaxWidth()
+                        .testTag("home_battery_shield_banner")
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(
+                                Brush.horizontalGradient(
+                                    listOf(Color(0xFF2B1D0E), Color(0xFF171126))
+                                )
+                            )
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon3DBadge(
+                            icon = Icons.Default.BatteryChargingFull,
+                            contentDescription = null,
+                            size = 36.dp,
+                            accentStart = Color(0xFFF59E0B),
+                            accentEnd = Color(0xFFB45309)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Keep Background Shield Alive",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = PureWhite
+                            )
+                            Text(
+                                text = "Set Battery to Unrestricted so Android never pauses App Lock.",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = TextSecondary
+                            )
+                        }
+                        TextButton(
+                            onClick = {
+                                onSuppressNextRelock()
+                                try {
+                                    context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+                                } catch (_: Exception) {
+                                    context.startActivity(
+                                        Intent(
+                                            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                            Uri.parse("package:${context.packageName}")
+                                        )
+                                    )
+                                }
+                            },
+                            modifier = Modifier.testTag("home_battery_optimize_btn")
+                        ) {
+                            Text("Fix", color = Color(0xFFFBBF24), fontWeight = FontWeight.Bold)
+                        }
+                        IconButton(
+                            onClick = { batteryBannerDismissed = true },
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Dismiss Battery Tip",
+                                tint = TextTertiary,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
             Tactile3DCard(
                 highlighted = healthScore >= 80,
                 shape = RoundedCornerShape(22.dp),
@@ -551,23 +636,98 @@ fun AppGuardHomeScreen(
                         Spacer(modifier = Modifier.height(12.dp))
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Text(
-                                "${lockedPackageSet.size} Apps Locked",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = TextSecondary
-                            )
-                            Text(
-                                "$intruderCount Intruders",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = TextSecondary
-                            )
-                            Text(
-                                "$vaultCount Vault Files",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = TextSecondary
-                            )
+                            Surface(
+                                onClick = {
+                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    selectedCategory = AppCategory.LOCKED
+                                },
+                                shape = RoundedCornerShape(12.dp),
+                                color = ObsidianElevated.copy(alpha = 0.85f),
+                                border = BorderStroke(1.dp, ElectricPurple.copy(alpha = 0.4f)),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("home_stat_locked_pill")
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 7.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Text(
+                                        text = "${lockedPackageSet.size}",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = NeonViolet
+                                    )
+                                    Text(
+                                        text = "Locked",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = TextSecondary
+                                    )
+                                }
+                            }
+                            Surface(
+                                onClick = {
+                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    onNavigateToIntruders()
+                                },
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (intruderCount > 0) Color(0xFF3A0F1F) else ObsidianElevated.copy(alpha = 0.85f),
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (intruderCount > 0) CrimsonAlert.copy(alpha = 0.7f) else ObsidianBorder
+                                ),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("home_stat_intruders_pill")
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 7.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Text(
+                                        text = "$intruderCount",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = if (intruderCount > 0) CrimsonAlert else PureWhite
+                                    )
+                                    Text(
+                                        text = "Intruders",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = if (intruderCount > 0) Color(0xFFFCA5A5) else TextSecondary
+                                    )
+                                }
+                            }
+                            Surface(
+                                onClick = {
+                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    onNavigateToVault()
+                                },
+                                shape = RoundedCornerShape(12.dp),
+                                color = ObsidianElevated.copy(alpha = 0.85f),
+                                border = BorderStroke(1.dp, CyberCyan.copy(alpha = 0.4f)),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("home_stat_vault_pill")
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 7.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Text(
+                                        text = "$vaultCount",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = CyberCyan
+                                    )
+                                    Text(
+                                        text = "Vault Files",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = TextSecondary
+                                    )
+                                }
+                            }
                         }
                     }
                 }

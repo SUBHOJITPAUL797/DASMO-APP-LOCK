@@ -1,8 +1,10 @@
 package com.example.service
 
 import android.app.AppOpsManager
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
@@ -16,6 +18,7 @@ import android.os.Process
 import android.provider.Settings
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import com.example.MainActivity
 import com.example.R
 import com.example.data.db.AppGuardDatabase
 import com.example.domain.model.SecuritySettings
@@ -150,6 +153,9 @@ class AppLockService : Service() {
             repository.restoreLockedAppsIfNeeded(this@AppLockService)
             repository.allLockedApps.collect { apps ->
                 cachedLockedPackages = apps.filter { it.isLocked }.associate { it.packageName to it.appLabel }
+                if (isRunning) {
+                    updateForegroundNotification()
+                }
             }
         }
 
@@ -160,14 +166,40 @@ class AppLockService : Service() {
         }
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        createNotificationChannel()
-        val notification = NotificationCompat.Builder(this, "app_lock_channel")
+    private fun buildServiceNotification(): Notification {
+        val launchIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val pendingFlags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        val contentIntent = PendingIntent.getActivity(this, 0, launchIntent, pendingFlags)
+        val count = cachedLockedPackages.size
+        val contentText = when {
+            count == 1 -> "Shielding 1 locked app in real time"
+            count > 1 -> "Shielding $count locked apps in real time"
+            else -> "Shield active • Ready to protect apps"
+        }
+
+        return NotificationCompat.Builder(this, "app_lock_channel")
             .setContentTitle("DASMO LOCK Active")
-            .setContentText("Shielding locked apps in real time")
+            .setContentText(contentText)
             .setSmallIcon(R.drawable.ic_lock_notification)
+            .setContentIntent(contentIntent)
             .setOngoing(true)
             .build()
+    }
+
+    private fun updateForegroundNotification() {
+        try {
+            val manager = getSystemService(NotificationManager::class.java)
+            manager?.notify(1, buildServiceNotification())
+        } catch (_: Exception) {
+            // Ignore if notifications are suppressed
+        }
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        createNotificationChannel()
+        val notification = buildServiceNotification()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(
@@ -185,6 +217,11 @@ class AppLockService : Service() {
         }
 
         return START_STICKY
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        startIfPermitted(applicationContext)
     }
 
     private fun createNotificationChannel() {

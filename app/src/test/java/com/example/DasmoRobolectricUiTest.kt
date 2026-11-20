@@ -367,4 +367,75 @@ class DasmoRobolectricUiTest {
             db.close()
         }
     }
+
+    @Test
+    fun `intruder vault displays target app name, filters by app, and ignores metadata sidecars in count`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        com.example.presentation.screens.intruders.IntruderLogStore.clearAll(context)
+
+        val dir = com.example.presentation.screens.intruders.IntruderLogStore.getIntruderDir(context)
+        val photo1 = java.io.File(dir, "intruder_1000.jpg").apply { writeBytes(byteArrayOf(1, 2, 3)) }
+        com.example.presentation.screens.intruders.IntruderLogStore.saveMetadata(
+            photoFile = photo1,
+            targetPackageName = "com.whatsapp",
+            targetAppLabel = "WhatsApp",
+            authMethodLabel = "Pattern",
+            failedAttemptNumber = 2,
+            timestampMillis = 1_760_000_001_000L
+        )
+        val photo2 = java.io.File(dir, "intruder_2000.jpg").apply { writeBytes(byteArrayOf(4, 5, 6)) }
+        com.example.presentation.screens.intruders.IntruderLogStore.saveMetadata(
+            photoFile = photo2,
+            targetPackageName = "com.instagram.android",
+            targetAppLabel = "Instagram",
+            authMethodLabel = "Password",
+            failedAttemptNumber = 1,
+            timestampMillis = 1_760_000_002_000L
+        )
+
+        // Sidecar .meta.json files must NOT be counted as intruder photos
+        assertTrue(com.example.presentation.screens.intruders.IntruderLogStore.countIntruders(context) == 2)
+
+        composeTestRule.setContent {
+            MyApplicationTheme {
+                com.example.presentation.screens.intruders.IntruderVaultScreen(
+                    context = context,
+                    onBack = {}
+                )
+            }
+        }
+
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("intruder_summary_banner").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("intruder_filter_whatsapp").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("intruder_filter_instagram").assertIsDisplayed()
+
+        // Filter to WhatsApp and open evidence detail dialog
+        composeTestRule.onNodeWithTag("intruder_filter_whatsapp").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("intruder_card_0").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("intruder_detail_dialog").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("intruder_detail_app_name").assertIsDisplayed()
+
+        com.example.presentation.screens.intruders.IntruderLogStore.clearAll(context)
+    }
+
+    @Test
+    fun `intruder log store encodes and decodes target app metadata safely`() {
+        val original = com.example.presentation.screens.intruders.IntruderMetadata(
+            targetPackageName = "com.whatsapp",
+            targetAppLabel = "WhatsApp",
+            authMethodLabel = "Pattern",
+            failedAttemptNumber = 3,
+            timestampMillis = 1_760_000_000_000L,
+            isUninstallProtection = false
+        )
+        val encoded = com.example.presentation.screens.intruders.IntruderLogStore.encodeMetadataJson(original)
+        val decoded = com.example.presentation.screens.intruders.IntruderLogStore.decodeMetadataJson(encoded)
+        org.junit.Assert.assertEquals(original, decoded)
+
+        org.junit.Assert.assertNull(com.example.presentation.screens.intruders.IntruderLogStore.decodeMetadataJson("not-json"))
+        org.junit.Assert.assertNull(com.example.presentation.screens.intruders.IntruderLogStore.decodeMetadataJson(""))
+    }
 }

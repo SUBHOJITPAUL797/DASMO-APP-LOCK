@@ -1112,6 +1112,17 @@ internal fun AutoLockCategoryContent(
     )
 
     TactileSettingSwitchCard(
+        icon = Icons.Default.AddModerator,
+        title = "Auto-Lock Newly Installed Apps",
+        description = "Instantly locks any newly installed app from Play Store or APK so new apps stay protected automatically.",
+        checked = draft.autoLockNewAppsEnabled,
+        accentStart = NeonEmerald,
+        accentEnd = Color(0xFF047857),
+        testTag = "switch_auto_lock_new_apps",
+        onCheckedChange = { onDraftChange(draft.copy(autoLockNewAppsEnabled = it)) }
+    )
+
+    TactileSettingSwitchCard(
         icon = Icons.Default.ScreenshotMonitor,
         title = "Prevent Screenshots & Blur Recents",
         description = "Applies FLAG_SECURE to black out app previews in Android Recents and block screen recording.",

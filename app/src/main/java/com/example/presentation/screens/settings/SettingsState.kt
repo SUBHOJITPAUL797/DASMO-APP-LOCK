@@ -75,6 +75,7 @@ data class SettingsDraftState(
     val preventScreenshots: Boolean = true,
     val calculatorDisguiseEnabled: Boolean = false,
     val uninstallProtectionEnabled: Boolean = false,
+    val autoLockNewAppsEnabled: Boolean = false,
     val autoLockSelection: AutoLockDraftSelection = AutoLockDraftSelection.Preset(300_000L),
     val customTimeoutError: String? = null
 ) {
@@ -97,6 +98,7 @@ data class SettingsDraftState(
             preventScreenshots != baseline.preventScreenshots ||
             calculatorDisguiseEnabled != baseline.calculatorDisguiseEnabled ||
             uninstallProtectionEnabled != baseline.uninstallProtectionEnabled ||
+            autoLockNewAppsEnabled != baseline.autoLockNewAppsEnabled ||
             autoLockSelection != baseline.autoLockSelection
     }
 
@@ -127,6 +129,7 @@ data class SettingsDraftState(
                 preventScreenshots = settings.preventScreenshots,
                 calculatorDisguiseEnabled = settings.calculatorDisguiseEnabled,
                 uninstallProtectionEnabled = settings.uninstallProtectionEnabled,
+                autoLockNewAppsEnabled = settings.autoLockNewAppsEnabled,
                 autoLockSelection = selection
             )
         }
@@ -281,6 +284,7 @@ object SettingsValidator {
                 preventScreenshots = draft.preventScreenshots,
                 calculatorDisguiseEnabled = draft.calculatorDisguiseEnabled,
                 uninstallProtectionEnabled = draft.uninstallProtectionEnabled,
+                autoLockNewAppsEnabled = draft.autoLockNewAppsEnabled,
                 autoLockTimeoutMillis = resolvedTimeoutMillis
             ),
             recoveryUpdate = recoveryUpdate

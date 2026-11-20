@@ -123,6 +123,7 @@ object VaultStorageManager {
                 "security_answer",
                 "decoy_pin",
                 "uninstall_protection",
+                "auto_lock_new_apps",
                 "calculator_disguise",
                 "auto_lock_timeout",
                 "dynamic_time_pin",
