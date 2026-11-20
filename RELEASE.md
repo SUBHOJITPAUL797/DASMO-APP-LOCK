@@ -13,14 +13,14 @@
 
 ---
 
-## 📋 GitHub Release Notes (v1.0.9)
+## 📋 GitHub Release Notes (v1.0.10)
 
 ```markdown
-# 🛡️ DASMO Lock v1.0.9 — Multi-Method Authentication, Reinstall Persistence & Vault Integrity Overhaul
+# 🛡️ DASMO Lock v1.0.10 — Intruder Detection Selfie Vault, New App Auto-Lock & Health Engine
 
 ### 🏷️ Metadata
-- **Version:** `v1.0.9`
-- **versionCode:** `10`
+- **Version:** `v1.0.10`
+- **versionCode:** `11`
 - **Package:** `dasmo.lock.subhojit`
 - **Channel:** Production (Stable)
 - **Minimum OS:** Android 7.0 (API Level 24)
@@ -31,18 +31,17 @@
 
 ### 🚀 Highlights & What's New
 
-- **🔐 Multi-Method Authentication (Pattern, Password, PIN):**
-  - Added full support for flexible authentication types including custom dot patterns, text passwords, and numeric PINs in security settings and lock screens.
-  - Interactive tactile `PatternLockView` with smooth gestures, dynamic animations, and real-time validation.
-- **🔄 Re-install & Update Persistence:**
-  - Enhanced Room persistence layer in `AppLockDao` so locked application configurations survive app updates and re-installation.
-  - Added `MY_PACKAGE_REPLACED` intent receiver in `BootReceiver` ensuring immediate service startup and security enforcement right after an OTA update.
-- **🖼️ Vault Media Cleaning & Gallery De-indexing:**
-  - Upgraded media scanner and gallery cleaner logic in `VaultMediaCleaner` to promptly purge encrypted media files from device gallery and external media stores.
-- **⚙️ Redesigned Settings & Update Tabs:**
-  - Modernized settings architecture with dedicated tabs (`SettingsTabContents.kt`, `SettingsUpdatesTab.kt`) for granular app protection and in-app update management.
-- **🧪 Comprehensive Test Coverage:**
-  - Expanded unit and Robolectric UI test suites covering multi-method security workflows, biometric fallbacks, and encryption models.
+- **🚨 Intruder Detection & Selfie Capture Vault:**
+  - Automated front-camera selfie capture upon failed authentication attempts.
+  - Built-in `IntruderLogStore` tracking breach timestamps, targeted app packages, and attempt frequency.
+  - Revamped `IntruderVaultScreen` with interactive gallery preview, batch delete, and evidence export.
+- **📲 Instant Auto-Lock for Newly Installed Applications:**
+  - Added `PackageInstallReceiver` to immediately detect newly installed apps from Play Store or APK sideloads.
+  - Configurable `autoLockNewAppsEnabled` setting in Security Settings to proactively protect privacy without manual intervention.
+- **🛡️ Dynamic Security Health Engine:**
+  - Upgraded real-time security health scoring in `AppGuardHomeScreen` dynamically assessing intruder activity, unprotected sensitive apps, and biometric configurations.
+- **🧪 Robust Automated Test Suite:**
+  - Expanded unit and Robolectric UI coverage for package installation listeners, intruder selfie store lifecycle, and health score calculations.
 
 ---
 
@@ -50,16 +49,16 @@
 
 | File | Type | Target Architecture | Size | Checksum (SHA-256) |
 | :--- | :--- | :--- | :--- | :--- |
-| [`dasmo-lock-v1.0.9.apk`](https://github.com/SUBHOJITPAUL797/DASMO-APP-LOCK/releases/download/v1.0.9/dasmo-lock-v1.0.9.apk) | Production APK | Universal (arm64-v8a, armeabi-v7a, x86_64) | 20.87 MB | `0A12332193435C5DE159FFCE8A217A498C5A1612E7E2D520CA8839B26F1D6DA9` |
+| [`dasmo-lock-v1.0.10.apk`](https://github.com/SUBHOJITPAUL797/DASMO-APP-LOCK/releases/download/v1.0.10/dasmo-lock-v1.0.10.apk) | Production APK | Universal (arm64-v8a, armeabi-v7a, x86_64) | 20.90 MB | `18F229A8E2E249427034447D839B9B0791630A779264431E4AE4F3DCAC2026BE` |
 ```
 
 ---
 
-## 🚀 Current Production Release: v1.0.9
+## 🚀 Current Production Release: v1.0.10
 
 ### Version Summary
-- **Tag:** `v1.0.9`
-- **Version Code:** `10`
-- **Version Name:** `1.0.9`
+- **Tag:** `v1.0.10`
+- **Version Code:** `11`
+- **Version Name:** `1.0.10`
 - **Status:** General Availability (GA)
 - **Repository:** `SUBHOJITPAUL797/DASMO-APP-LOCK`
