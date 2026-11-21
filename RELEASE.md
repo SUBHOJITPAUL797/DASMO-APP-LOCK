@@ -13,14 +13,14 @@
 
 ---
 
-## 📋 GitHub Release Notes (v1.0.10)
+## 📋 GitHub Release Notes (v1.0.11)
 
 ```markdown
-# 🛡️ DASMO Lock v1.0.10 — Intruder Detection Selfie Vault, New App Auto-Lock & Health Engine
+# 🛡️ DASMO Lock v1.0.11 — Covert Intruder Video Recording, Installed Apps Cache & Removal Tracking
 
 ### 🏷️ Metadata
-- **Version:** `v1.0.10`
-- **versionCode:** `11`
+- **Version:** `v1.0.11`
+- **versionCode:** `12`
 - **Package:** `dasmo.lock.subhojit`
 - **Channel:** Production (Stable)
 - **Minimum OS:** Android 7.0 (API Level 24)
@@ -31,17 +31,18 @@
 
 ### 🚀 Highlights & What's New
 
-- **🚨 Intruder Detection & Selfie Capture Vault:**
-  - Automated front-camera selfie capture upon failed authentication attempts.
-  - Built-in `IntruderLogStore` tracking breach timestamps, targeted app packages, and attempt frequency.
-  - Revamped `IntruderVaultScreen` with interactive gallery preview, batch delete, and evidence export.
-- **📲 Instant Auto-Lock for Newly Installed Applications:**
-  - Added `PackageInstallReceiver` to immediately detect newly installed apps from Play Store or APK sideloads.
-  - Configurable `autoLockNewAppsEnabled` setting in Security Settings to proactively protect privacy without manual intervention.
-- **🛡️ Dynamic Security Health Engine:**
-  - Upgraded real-time security health scoring in `AppGuardHomeScreen` dynamically assessing intruder activity, unprotected sensitive apps, and biometric configurations.
-- **🧪 Robust Automated Test Suite:**
-  - Expanded unit and Robolectric UI coverage for package installation listeners, intruder selfie store lifecycle, and health score calculations.
+- **📹 Covert Intruder Video Recording:**
+  - Added covert front-camera video recording (`IntruderCameraCapture.kt`) triggered upon repeated failed unlock attempts.
+  - Updated `IntruderLogStore` to track and distinguish between photo and video evidence types.
+  - Enhanced `IntruderVaultScreen` with seamless in-app video playback, scrubbing controls, and evidence export.
+- **⚡ Installed Apps Cache Performance Engine:**
+  - Introduced `InstalledAppsCache` providing instantaneous app list loading, background querying, and reduced main-thread load.
+- **📦 Comprehensive App Removal & Uninstall Tracking:**
+  - Upgraded `PackageInstallReceiver` to actively monitor uninstalled packages and automatically prune outdated lock rules and caches.
+- **🚨 Enhanced Alarm Siren & Tamper Defense:**
+  - Upgraded `AlarmAlertHelper` siren activation and volume override logic to deter unauthorized device access.
+- **🧪 Robust Automated Test Coverage:**
+  - Added unit and Robolectric UI tests validating video recording metadata, cache invalidation, and app uninstall listeners.
 
 ---
 
@@ -49,16 +50,16 @@
 
 | File | Type | Target Architecture | Size | Checksum (SHA-256) |
 | :--- | :--- | :--- | :--- | :--- |
-| [`dasmo-lock-v1.0.10.apk`](https://github.com/SUBHOJITPAUL797/DASMO-APP-LOCK/releases/download/v1.0.10/dasmo-lock-v1.0.10.apk) | Production APK | Universal (arm64-v8a, armeabi-v7a, x86_64) | 20.90 MB | `18F229A8E2E249427034447D839B9B0791630A779264431E4AE4F3DCAC2026BE` |
+| [`dasmo-lock-v1.0.11.apk`](https://github.com/SUBHOJITPAUL797/DASMO-APP-LOCK/releases/download/v1.0.11/dasmo-lock-v1.0.11.apk) | Production APK | Universal (arm64-v8a, armeabi-v7a, x86_64) | 20.91 MB | `2E54FC6C38C9064B3FFCF34CF17E7A4F60732C66CC688EEEA47B277675FD3B0E` |
 ```
 
 ---
 
-## 🚀 Current Production Release: v1.0.10
+## 🚀 Current Production Release: v1.0.11
 
 ### Version Summary
-- **Tag:** `v1.0.10`
-- **Version Code:** `11`
-- **Version Name:** `1.0.10`
+- **Tag:** `v1.0.11`
+- **Version Code:** `12`
+- **Version Name:** `1.0.11`
 - **Status:** General Availability (GA)
 - **Repository:** `SUBHOJITPAUL797/DASMO-APP-LOCK`
