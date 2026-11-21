@@ -58,6 +58,7 @@ class SecurePreferences(context: Context) {
             dynamicTimePinEnabled = getString(KEY_DYNAMIC_TIME_PIN, "false") == "true",
             scrambleKeypadEnabled = getString(KEY_SCRAMBLE_KEYPAD, "false") == "true",
             breakInSirenEnabled = getString(KEY_BREAK_IN_SIREN, "false") == "true",
+            intruderVideoEnabled = getString(KEY_INTRUDER_VIDEO, "false") == "true",
             preventScreenshots = getString(KEY_PREVENT_SCREENSHOTS, "true") == "true",
             calculatorDisguiseEnabled = getString(KEY_CALCULATOR_DISGUISE, "false") == "true",
             uninstallProtectionEnabled = getString(KEY_UNINSTALL_PROTECTION, "false") == "true",
@@ -99,6 +100,7 @@ class SecurePreferences(context: Context) {
         encryptIntoEditor(editor, KEY_DYNAMIC_TIME_PIN, settings.dynamicTimePinEnabled.toString())
         encryptIntoEditor(editor, KEY_SCRAMBLE_KEYPAD, settings.scrambleKeypadEnabled.toString())
         encryptIntoEditor(editor, KEY_BREAK_IN_SIREN, settings.breakInSirenEnabled.toString())
+        encryptIntoEditor(editor, KEY_INTRUDER_VIDEO, settings.intruderVideoEnabled.toString())
         encryptIntoEditor(editor, KEY_PREVENT_SCREENSHOTS, settings.preventScreenshots.toString())
         encryptIntoEditor(editor, KEY_CALCULATOR_DISGUISE, settings.calculatorDisguiseEnabled.toString())
         encryptIntoEditor(editor, KEY_UNINSTALL_PROTECTION, settings.uninstallProtectionEnabled.toString())
@@ -193,6 +195,7 @@ class SecurePreferences(context: Context) {
         const val KEY_DYNAMIC_TIME_PIN = "dynamic_time_pin"
         const val KEY_SCRAMBLE_KEYPAD = "scramble_keypad"
         const val KEY_BREAK_IN_SIREN = "break_in_siren"
+        const val KEY_INTRUDER_VIDEO = "intruder_video"
         const val KEY_PREVENT_SCREENSHOTS = "prevent_screenshots"
         const val KEY_CALCULATOR_DISGUISE = "calculator_disguise"
         const val KEY_UNINSTALL_PROTECTION = "uninstall_protection"
@@ -216,6 +219,7 @@ class SecurePreferences(context: Context) {
             KEY_DYNAMIC_TIME_PIN,
             KEY_SCRAMBLE_KEYPAD,
             KEY_BREAK_IN_SIREN,
+            KEY_INTRUDER_VIDEO,
             KEY_PREVENT_SCREENSHOTS,
             KEY_HIDDEN_APPS,
             KEY_LOCKED_APPS_BACKUP

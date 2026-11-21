@@ -33,6 +33,7 @@ sealed interface VaultAccessState {
         val enteredPassword: String = "",
         val passwordVisible: Boolean = false,
         val patternAttemptCount: Int = 0,
+        val failedAttempts: Int = 0,
         val forcePinMode: Boolean = false,
         val errorMessage: String? = null
     ) : VaultAccessState

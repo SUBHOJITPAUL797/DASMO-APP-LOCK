@@ -2,6 +2,8 @@ package com.example.presentation.screens.intruders
 
 import android.content.Context
 import android.content.pm.PackageManager
+import android.media.MediaMetadataRetriever
+import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
@@ -41,9 +43,15 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.graphics.drawable.toBitmap
+import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import com.example.R
 import com.example.ui.components.Icon3DBadge
@@ -115,6 +123,93 @@ private fun TargetAppIconBadge(
             accentEnd = if (isUninstallProtection) Color(0xFF881337) else DeepViolet
         )
     }
+}
+
+@Composable
+private fun IntruderVideoThumbnail(
+    videoFile: java.io.File,
+    contentDescription: String,
+    modifier: Modifier = Modifier
+) {
+    var thumbnail by remember(videoFile.absolutePath) { mutableStateOf<ImageBitmap?>(null) }
+
+    LaunchedEffect(videoFile.absolutePath) {
+        thumbnail = withContext(Dispatchers.IO) {
+            val retriever = MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(videoFile.absolutePath)
+                retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)?.asImageBitmap()
+            } catch (_: Exception) {
+                null
+            } finally {
+                try {
+                    retriever.release()
+                } catch (_: Exception) {
+                }
+            }
+        }
+    }
+
+    if (thumbnail != null) {
+        Image(
+            bitmap = thumbnail!!,
+            contentDescription = contentDescription,
+            contentScale = ContentScale.Crop,
+            modifier = modifier
+        )
+    } else {
+        Box(
+            modifier = modifier.background(
+                Brush.linearGradient(
+                    listOf(Color(0xFF281038), Color(0xFF140A24), Color(0xFF230E2C))
+                )
+            ),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.Default.Videocam,
+                contentDescription = contentDescription,
+                tint = NeonViolet.copy(alpha = 0.45f),
+                modifier = Modifier.size(44.dp)
+            )
+        }
+    }
+}
+
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+@Composable
+private fun IntruderEmbeddedVideoPlayer(
+    videoFile: java.io.File,
+    context: Context,
+    modifier: Modifier = Modifier
+) {
+    val exoPlayer = remember(videoFile.absolutePath) {
+        ExoPlayer.Builder(context).build().apply {
+            setMediaItem(MediaItem.fromUri(Uri.fromFile(videoFile)))
+            repeatMode = Player.REPEAT_MODE_ONE
+            prepare()
+            playWhenReady = true
+        }
+    }
+
+    DisposableEffect(videoFile.absolutePath) {
+        onDispose {
+            exoPlayer.release()
+        }
+    }
+
+    AndroidView(
+        factory = { ctx ->
+            PlayerView(ctx).apply {
+                player = exoPlayer
+                useController = true
+                setShowNextButton(false)
+                setShowPreviousButton(false)
+                resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+            }
+        },
+        modifier = modifier.background(Color.Black)
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -295,7 +390,7 @@ fun IntruderVaultScreen(context: Context, onBack: () -> Unit) {
                                 )
                                 Spacer(modifier = Modifier.height(8.dp))
                                 Text(
-                                    text = "Whenever someone enters a wrong PIN, Pattern, Password, or Biometric, DASMO LOCK silently captures their front-camera photo and logs the exact app they tried to open.",
+                                    text = "Whenever someone enters a wrong PIN, Pattern, Password, or Biometric, DASMO LOCK silently captures their front-camera photo (or an 8s video after 3 wrong tries) and logs the exact app they tried to open.",
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = TextSecondary,
                                     textAlign = TextAlign.Center
@@ -432,6 +527,7 @@ fun IntruderVaultScreen(context: Context, onBack: () -> Unit) {
 
                 is IntruderModalState.PreviewRecord -> {
                     IntruderEvidenceDetailDialog(
+                        context = context,
                         record = modal.record,
                         formattedFullDate = fullDateFormatter.format(Date(modal.record.timestampMillis)),
                         packageManager = packageManager,
@@ -462,7 +558,7 @@ fun IntruderVaultScreen(context: Context, onBack: () -> Unit) {
                         },
                         text = {
                             Text(
-                                text = "This will permanently delete all $totalCount captured intruder photos and target app logs.",
+                                text = "This will permanently delete all $totalCount captured intruder photos, videos, and target app logs.",
                                 color = TextSecondary
                             )
                         },
@@ -585,12 +681,20 @@ private fun IntruderEvidenceCard(
             .testTag("intruder_card_$index")
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
-            AsyncImage(
-                model = record.photoFile,
-                contentDescription = "Intruder trying to open ${record.targetAppLabel}",
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize()
-            )
+            if (record.isVideo) {
+                IntruderVideoThumbnail(
+                    videoFile = record.photoFile,
+                    contentDescription = "Intruder video targeting ${record.targetAppLabel}",
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                AsyncImage(
+                    model = record.photoFile,
+                    contentDescription = "Intruder trying to open ${record.targetAppLabel}",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
 
             // Top dark gradient scrim for badge readability
             Box(
@@ -628,6 +732,58 @@ private fun IntruderEvidenceCard(
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                 )
+            }
+
+            if (record.isVideo) {
+                Surface(
+                    shape = CircleShape,
+                    color = Color(0xFFEC4899).copy(alpha = 0.92f),
+                    border = BorderStroke(1.dp, PureWhite.copy(alpha = 0.55f)),
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(8.dp)
+                        .testTag("intruder_video_badge_$index")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Videocam,
+                            contentDescription = "Video Evidence",
+                            tint = PureWhite,
+                            modifier = Modifier.size(12.dp)
+                        )
+                        if (record.durationSeconds > 0) {
+                            Spacer(modifier = Modifier.width(3.dp))
+                            Text(
+                                text = "${record.durationSeconds}s",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = PureWhite,
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                        }
+                    }
+                }
+
+                // Centered Play emblem so video evidence is immediately recognizable
+                Surface(
+                    shape = CircleShape,
+                    color = ObsidianBlack.copy(alpha = 0.68f),
+                    border = BorderStroke(1.5.dp, PureWhite.copy(alpha = 0.75f)),
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .size(46.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = Icons.Default.PlayArrow,
+                            contentDescription = "Play Intruder Video",
+                            tint = PureWhite,
+                            modifier = Modifier.size(28.dp)
+                        )
+                    }
+                }
             }
 
             // Bottom gradient overlay with target app icon, app name, and timestamp
@@ -690,6 +846,7 @@ private fun IntruderEvidenceCard(
 
 @Composable
 private fun IntruderEvidenceDetailDialog(
+    context: Context,
     record: IntruderRecord,
     formattedFullDate: String,
     packageManager: PackageManager,
@@ -720,15 +877,25 @@ private fun IntruderEvidenceDetailDialog(
                         .height(330.dp)
                         .background(ObsidianBlack)
                 ) {
-                    AsyncImage(
-                        model = record.photoFile,
-                        contentDescription = "Intruder photo targeting ${record.targetAppLabel}",
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize()
-                    )
+                    if (record.isVideo) {
+                        IntruderEmbeddedVideoPlayer(
+                            videoFile = record.photoFile,
+                            context = context,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .testTag("intruder_detail_video_player")
+                        )
+                    } else {
+                        AsyncImage(
+                            model = record.photoFile,
+                            contentDescription = "Intruder photo targeting ${record.targetAppLabel}",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
                     Surface(
                         shape = CircleShape,
-                        color = CrimsonAlert.copy(alpha = 0.88f),
+                        color = if (record.isVideo) Color(0xFFEC4899).copy(alpha = 0.9f) else CrimsonAlert.copy(alpha = 0.88f),
                         modifier = Modifier
                             .align(Alignment.TopStart)
                             .padding(12.dp)
@@ -738,14 +905,18 @@ private fun IntruderEvidenceDetailDialog(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Icon(
-                                imageVector = Icons.Default.Warning,
+                                imageVector = if (record.isVideo) Icons.Default.Videocam else Icons.Default.Warning,
                                 contentDescription = null,
                                 tint = PureWhite,
                                 modifier = Modifier.size(14.dp)
                             )
                             Spacer(modifier = Modifier.width(5.dp))
                             Text(
-                                text = "INTRUDER CAUGHT",
+                                text = if (record.isVideo) {
+                                    if (record.durationSeconds > 0) "INTRUDER VIDEO • ${record.durationSeconds}s" else "INTRUDER VIDEO"
+                                } else {
+                                    "INTRUDER CAUGHT"
+                                },
                                 style = MaterialTheme.typography.labelSmall,
                                 color = PureWhite,
                                 fontWeight = FontWeight.ExtraBold

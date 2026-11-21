@@ -57,6 +57,7 @@ import com.example.service.AppLockService
 import com.example.ui.components.Icon3DBadge
 import com.example.ui.components.Tactile3DCard
 import com.example.ui.theme.*
+import com.example.util.InstalledAppsCache
 import com.example.util.SecurePreferences
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -125,17 +126,14 @@ fun calculateSecurityHealthScore(
 }
 
 @Composable
-fun AppIcon(packageName: String, packageManager: PackageManager) {
-    var icon by remember(packageName) { mutableStateOf<ImageBitmap?>(null) }
+fun AppIcon(packageName: String, context: Context) {
+    var icon by remember(packageName) {
+        mutableStateOf(InstalledAppsCache.getCachedIcon(packageName))
+    }
 
     LaunchedEffect(packageName) {
-        icon = withContext(Dispatchers.IO) {
-            try {
-                val drawable = packageManager.getApplicationIcon(packageName)
-                drawable.toBitmap(width = 120, height = 120).asImageBitmap()
-            } catch (_: Exception) {
-                null
-            }
+        if (icon == null) {
+            icon = InstalledAppsCache.loadIcon(context, packageName)
         }
     }
 
@@ -173,7 +171,8 @@ fun AppGuardHomeScreen(
     val securePrefs = remember { SecurePreferences.getInstance(context) }
     val settings by securePrefs.settingsFlow.collectAsStateWithLifecycle()
 
-    var installedApps by remember { mutableStateOf<List<InstalledAppEntry>>(emptyList()) }
+    val installedApps by InstalledAppsCache.appsFlow.collectAsStateWithLifecycle()
+    val isAppsLoading by InstalledAppsCache.isLoadingFlow.collectAsStateWithLifecycle()
     val lockedApps by repository.allLockedApps.collectAsStateWithLifecycle(initialValue = emptyList())
     var isUsageStatsEnabled by remember { mutableStateOf(false) }
     var isOverlayEnabled by remember { mutableStateOf(false) }
@@ -217,21 +216,8 @@ fun AppGuardHomeScreen(
 
     LaunchedEffect(Unit) {
         refreshCounts()
-        installedApps = withContext(Dispatchers.IO) {
-            val packages = pm.getInstalledApplications(PackageManager.GET_META_DATA)
-            packages.mapNotNull {
-                if (it.packageName == context.packageName) return@mapNotNull null
-                if (pm.getLaunchIntentForPackage(it.packageName) == null &&
-                    !it.packageName.contains("settings") &&
-                    !it.packageName.contains("vending")
-                ) return@mapNotNull null
-
-                InstalledAppEntry(
-                    packageName = it.packageName,
-                    label = it.loadLabel(pm).toString(),
-                    flags = it.flags
-                )
-            }.sortedBy { it.label.lowercase() }
+        launch {
+            InstalledAppsCache.refreshIfStale(context)
         }
         if (shouldRequestStartupPermissions) {
             onStartupPermissionsRequested()
@@ -839,17 +825,35 @@ fun AppGuardHomeScreen(
                 }
             }
 
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-            ) {
-                items(filteredApps, key = { it.packageName }) { app ->
-                    val isLocked = lockedPackageSet.contains(app.packageName)
-                    val isHidden = settings.hiddenApps.contains(app.packageName)
+            if (installedApps.isEmpty() && isAppsLoading) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        CircularProgressIndicator(color = NeonViolet)
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text(
+                            text = "Scanning installed apps...",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextSecondary
+                        )
+                    }
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                ) {
+                    items(filteredApps, key = { it.packageName }) { app ->
+                        val isLocked = lockedPackageSet.contains(app.packageName)
+                        val isHidden = settings.hiddenApps.contains(app.packageName)
 
-                    ListItem(
-                        leadingContent = { AppIcon(app.packageName, pm) },
+                        ListItem(
+                            leadingContent = { AppIcon(app.packageName, context) },
                         headlineContent = { Text(app.label, fontWeight = FontWeight.Medium) },
                         supportingContent = {
                             Column {
@@ -902,6 +906,7 @@ fun AppGuardHomeScreen(
                     )
                     HorizontalDivider(color = ObsidianBorder.copy(alpha = 0.45f))
                 }
+            }
             }
         }
     }

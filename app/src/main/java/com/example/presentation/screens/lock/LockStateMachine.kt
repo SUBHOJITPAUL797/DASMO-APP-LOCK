@@ -115,6 +115,7 @@ sealed interface LockScreenStage {
 sealed interface LockEffect {
     data object UnlockGranted : LockEffect
     data object TriggerIntruderCapture : LockEffect
+    data object TriggerIntruderVideo : LockEffect
     data object TriggerBreakInSiren : LockEffect
 }
 
@@ -273,7 +274,11 @@ object LockStateMachine {
 
     private fun buildFailureEffects(failedCount: Int, settings: SecuritySettings): List<LockEffect> {
         return buildList {
-            add(LockEffect.TriggerIntruderCapture)
+            if (failedCount >= 3 && settings.intruderVideoEnabled) {
+                add(LockEffect.TriggerIntruderVideo)
+            } else {
+                add(LockEffect.TriggerIntruderCapture)
+            }
             if (failedCount >= 3 && settings.breakInSirenEnabled) {
                 add(LockEffect.TriggerBreakInSiren)
             }

@@ -2,19 +2,12 @@ package com.example.presentation.screens.lock
 
 import android.content.Intent
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
-import android.util.Log
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
-import androidx.camera.core.CameraSelector
-import androidx.camera.core.ImageCapture
-import androidx.camera.core.ImageCaptureException
-import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.keyframes
@@ -95,79 +88,6 @@ import java.io.File
 sealed interface LockRecoveryDialogState {
     data object Hidden : LockRecoveryDialogState
     data class Visible(val input: String = "", val error: String? = null) : LockRecoveryDialogState
-}
-
-fun takeIntruderSelfie(
-    activity: FragmentActivity,
-    targetPackageName: String = "",
-    targetAppLabel: String = "Locked App",
-    authMethodLabel: String = "PIN",
-    failedAttemptNumber: Int = 1,
-    isUninstallProtection: Boolean = false
-) {
-    if (ContextCompat.checkSelfPermission(activity, android.Manifest.permission.CAMERA) !=
-        android.content.pm.PackageManager.PERMISSION_GRANTED
-    ) {
-        return
-    }
-
-    val cameraProviderFuture = ProcessCameraProvider.getInstance(activity)
-    cameraProviderFuture.addListener({
-        try {
-            val cameraProvider = cameraProviderFuture.get()
-            val imageCapture = ImageCapture.Builder()
-                .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-                .build()
-            val cameraSelector = CameraSelector.DEFAULT_FRONT_CAMERA
-
-            cameraProvider.unbindAll()
-            if (activity.isFinishing || activity.isDestroyed) return@addListener
-
-            cameraProvider.bindToLifecycle(activity as LifecycleOwner, cameraSelector, imageCapture)
-
-            val dir = IntruderLogStore.getIntruderDir(activity)
-            val captureTimestamp = System.currentTimeMillis()
-            val file = File(dir, "intruder_${captureTimestamp}.jpg")
-            val outputOptions = ImageCapture.OutputFileOptions.Builder(file).build()
-
-            Handler(Looper.getMainLooper()).postDelayed({
-                try {
-                    if (activity.isFinishing || activity.isDestroyed) {
-                        cameraProvider.unbindAll()
-                        return@postDelayed
-                    }
-                    imageCapture.takePicture(
-                        outputOptions,
-                        ContextCompat.getMainExecutor(activity),
-                        object : ImageCapture.OnImageSavedCallback {
-                            override fun onImageSaved(output: ImageCapture.OutputFileResults) {
-                                IntruderLogStore.saveMetadata(
-                                    photoFile = file,
-                                    targetPackageName = targetPackageName,
-                                    targetAppLabel = targetAppLabel,
-                                    authMethodLabel = authMethodLabel,
-                                    failedAttemptNumber = failedAttemptNumber,
-                                    isUninstallProtection = isUninstallProtection,
-                                    timestampMillis = captureTimestamp
-                                )
-                                cameraProvider.unbindAll()
-                            }
-
-                            override fun onError(exc: ImageCaptureException) {
-                                Log.e("Intruder", "Photo capture failed: ${exc.message}", exc)
-                                cameraProvider.unbindAll()
-                            }
-                        }
-                    )
-                } catch (exc: Exception) {
-                    Log.e("Intruder", "Error capturing intruder selfie: ${exc.message}", exc)
-                    cameraProvider.unbindAll()
-                }
-            }, 650)
-        } catch (exc: Exception) {
-            Log.e("Intruder", "Use case binding failed", exc)
-        }
-    }, ContextCompat.getMainExecutor(activity))
 }
 
 class LockActivity : FragmentActivity() {
@@ -287,8 +207,12 @@ fun LockScreenContent(
         }
     }
 
+    val latestSettings by rememberUpdatedState(settings)
+
     LaunchedEffect(stage) {
         if (stage is LockScreenStage.Unlocked) {
+            IntruderCameraCapture.stopActiveVideoIfRunning()
+            AlarmAlertHelper.stopBreakInAlarm(activity)
             delay(280)
             onUnlockSuccess()
         }
@@ -299,22 +223,34 @@ fun LockScreenContent(
         authMethodOverride: String? = null,
         attemptCount: Int = stage.currentFailedAttempts
     ) {
+        val activeSettings = latestSettings
         val resolvedMethod = authMethodOverride ?: when (stage) {
             is LockScreenStage.PatternAuthentication -> "Pattern"
             is LockScreenStage.PasswordAuthentication -> "Password"
             else -> "PIN"
         }
-        val isUninstallTarget = settings.uninstallProtectionEnabled &&
+        val isUninstallTarget = activeSettings.uninstallProtectionEnabled &&
             LockSessionTracker.isUninstallProtectedPackage(target.packageName)
         effects.forEach { effect ->
             when (effect) {
-                LockEffect.UnlockGranted -> Unit
-                LockEffect.TriggerIntruderCapture -> takeIntruderSelfie(
+                LockEffect.UnlockGranted -> {
+                    IntruderCameraCapture.stopActiveVideoIfRunning()
+                    AlarmAlertHelper.stopBreakInAlarm(activity)
+                }
+                LockEffect.TriggerIntruderCapture -> IntruderCameraCapture.takeIntruderSelfie(
                     activity = activity,
                     targetPackageName = target.packageName,
                     targetAppLabel = target.appLabel.ifBlank { "Locked App" },
                     authMethodLabel = resolvedMethod,
                     failedAttemptNumber = attemptCount.coerceAtLeast(1),
+                    isUninstallProtection = isUninstallTarget
+                )
+                LockEffect.TriggerIntruderVideo -> IntruderCameraCapture.recordIntruderVideo(
+                    activity = activity,
+                    targetPackageName = target.packageName,
+                    targetAppLabel = target.appLabel.ifBlank { "Locked App" },
+                    authMethodLabel = resolvedMethod,
+                    failedAttemptNumber = attemptCount.coerceAtLeast(3),
                     isUninstallProtection = isUninstallTarget
                 )
                 LockEffect.TriggerBreakInSiren -> AlarmAlertHelper.playBreakInAlarm(activity)
@@ -359,7 +295,7 @@ fun LockScreenContent(
 
                     override fun onAuthenticationFailed() {
                         super.onAuthenticationFailed()
-                        val outcome = LockStateMachine.onBiometricFailed(stage, settings)
+                        val outcome = LockStateMachine.onBiometricFailed(stage, latestSettings)
                         stage = outcome.stage
                         handleEffects(
                             effects = outcome.effects,
@@ -599,7 +535,11 @@ fun LockScreenContent(
                                 onPatternComplete = { nodes ->
                                     val res = LockStateMachine.onPatternCompleted(stage, nodes, settings)
                                     stage = res.stage
-                                    handleEffects(res.effects)
+                                    handleEffects(
+                                        effects = res.effects,
+                                        authMethodOverride = "Pattern",
+                                        attemptCount = res.stage.currentFailedAttempts
+                                    )
                                 }
                             )
 
@@ -641,7 +581,11 @@ fun LockScreenContent(
                                     onDone = {
                                         val res = LockStateMachine.onPasswordSubmitted(stage, settings)
                                         stage = res.stage
-                                        handleEffects(res.effects)
+                                        handleEffects(
+                                            effects = res.effects,
+                                            authMethodOverride = "Password",
+                                            attemptCount = res.stage.currentFailedAttempts
+                                        )
                                     }
                                 ),
                                 trailingIcon = {
@@ -685,7 +629,11 @@ fun LockScreenContent(
                                     haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                                     val res = LockStateMachine.onPasswordSubmitted(stage, settings)
                                     stage = res.stage
-                                    handleEffects(res.effects)
+                                    handleEffects(
+                                        effects = res.effects,
+                                        authMethodOverride = "Password",
+                                        attemptCount = res.stage.currentFailedAttempts
+                                    )
                                 },
                                 colors = ButtonDefaults.buttonColors(
                                     containerColor = ElectricPurple,
@@ -825,7 +773,11 @@ fun LockScreenContent(
                                                         else -> {
                                                             val res = LockStateMachine.onDigitPressed(stage, key, settings)
                                                             stage = res.stage
-                                                            handleEffects(res.effects)
+                                                            handleEffects(
+                                                                effects = res.effects,
+                                                                authMethodOverride = "PIN",
+                                                                attemptCount = res.stage.currentFailedAttempts
+                                                            )
                                                         }
                                                     }
                                                 },

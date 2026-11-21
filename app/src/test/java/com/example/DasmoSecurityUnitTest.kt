@@ -615,4 +615,47 @@ class DasmoSecurityUnitTest {
         val maxScore = calculateSecurityHealthScore(lockedApps, hardenedSettings)
         assertEquals(100, maxScore)
     }
+
+    @Test
+    fun `lock state machine triggers video capture on 3rd wrong attempt when intruderVideoEnabled is on`() {
+        val settings = SecuritySettings(
+            masterPin = "5678",
+            intruderVideoEnabled = true,
+            breakInSirenEnabled = true
+        )
+        var stage: LockScreenStage = LockScreenStage.createPinStage(scrambleEnabled = false)
+
+        fun wrongAttempt(): List<LockEffect> {
+            var effects = emptyList<LockEffect>()
+            listOf("0", "0", "0", "0").forEach { d ->
+                val out = LockStateMachine.onDigitPressed(stage, d, settings)
+                stage = out.stage
+                effects = out.effects
+            }
+            return effects
+        }
+
+        // Attempts 1 & 2 take still photo
+        assertEquals(listOf(LockEffect.TriggerIntruderCapture), wrongAttempt())
+        assertEquals(listOf(LockEffect.TriggerIntruderCapture), wrongAttempt())
+
+        // Attempt 3 switches to intruder video capture (avoiding camera clash with still photo) + siren
+        assertEquals(
+            listOf(LockEffect.TriggerIntruderVideo, LockEffect.TriggerBreakInSiren),
+            wrongAttempt()
+        )
+    }
+
+    @Test
+    fun `settings validator persists intruderVideoEnabled toggle and tracks unsaved changes`() {
+        val base = SecuritySettings(masterPin = "4321", intruderVideoEnabled = false)
+        val draft = SettingsDraftState.fromSettings(base)
+        assertFalse(draft.hasUnsavedChanges(base))
+
+        val toggled = draft.copy(intruderVideoEnabled = true)
+        assertTrue(toggled.hasUnsavedChanges(base))
+
+        val saved = SettingsValidator.validateAndBuild(toggled, base) as SettingsSaveResult.Valid
+        assertTrue(saved.updatedSettings.intruderVideoEnabled)
+    }
 }

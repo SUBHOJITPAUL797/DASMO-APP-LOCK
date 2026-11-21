@@ -26,6 +26,7 @@ import com.example.presentation.screens.settings.SettingsScreen
 import com.example.presentation.screens.vault.SecureVaultScreen
 import com.example.service.AppLockService
 import com.example.ui.theme.MyApplicationTheme
+import com.example.util.InstalledAppsCache
 import com.example.util.SecurePreferences
 import com.example.util.VaultStorageManager
 import kotlinx.coroutines.Dispatchers
@@ -53,6 +54,9 @@ class MainActivity : FragmentActivity() {
         val securePrefs = SecurePreferences.getInstance(this)
         repository = AppLockRepository(AppGuardDatabase.getDatabase(this).appLockDao(), securePrefs)
 
+        lifecycleScope.launch(Dispatchers.IO) {
+            InstalledAppsCache.preload(this@MainActivity)
+        }
         lifecycleScope.launch(Dispatchers.IO) {
             VaultStorageManager.migrateLegacyInternalStorage(this@MainActivity)
             repository.restoreLockedAppsIfNeeded(this@MainActivity)

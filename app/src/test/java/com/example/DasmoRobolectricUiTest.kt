@@ -438,4 +438,58 @@ class DasmoRobolectricUiTest {
         org.junit.Assert.assertNull(com.example.presentation.screens.intruders.IntruderLogStore.decodeMetadataJson("not-json"))
         org.junit.Assert.assertNull(com.example.presentation.screens.intruders.IntruderLogStore.decodeMetadataJson(""))
     }
+
+    @Test
+    fun `installed apps cache encodes and decodes disk snapshot accurately`() {
+        val entries = listOf(
+            com.example.presentation.screens.home.InstalledAppEntry("com.whatsapp", "WhatsApp", 0),
+            com.example.presentation.screens.home.InstalledAppEntry("com.android.settings", "Settings", 1)
+        )
+        val json = com.example.util.InstalledAppsCache.encodeAppsJson(entries)
+        val decoded = com.example.util.InstalledAppsCache.decodeAppsJson(json)
+        org.junit.Assert.assertEquals(entries, decoded)
+        org.junit.Assert.assertTrue(com.example.util.InstalledAppsCache.decodeAppsJson("invalid").isEmpty())
+    }
+
+    @Test
+    fun `intruder log store loads mp4 video evidence with duration and renders video badge in vault`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        com.example.presentation.screens.intruders.IntruderLogStore.clearAll(context)
+
+        val dir = com.example.presentation.screens.intruders.IntruderLogStore.getIntruderDir(context)
+        val videoFile = java.io.File(dir, "intruder_video_3000.mp4").apply {
+            writeBytes(ByteArray(2048) { 7 })
+        }
+        com.example.presentation.screens.intruders.IntruderLogStore.saveMetadata(
+            photoFile = videoFile,
+            targetPackageName = "com.whatsapp",
+            targetAppLabel = "WhatsApp",
+            authMethodLabel = "PIN",
+            failedAttemptNumber = 3,
+            timestampMillis = 1_760_000_003_000L,
+            mediaType = com.example.presentation.screens.intruders.IntruderMediaType.VIDEO,
+            durationSeconds = 8
+        )
+
+        val records = com.example.presentation.screens.intruders.IntruderLogStore.loadAllRecords(context)
+        assertTrue(records.size == 1)
+        assertTrue(records.first().isVideo)
+        org.junit.Assert.assertEquals(8, records.first().durationSeconds)
+        org.junit.Assert.assertEquals("WhatsApp", records.first().targetAppLabel)
+
+        composeTestRule.setContent {
+            MyApplicationTheme {
+                com.example.presentation.screens.intruders.IntruderVaultScreen(
+                    context = context,
+                    onBack = {}
+                )
+            }
+        }
+
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("intruder_card_0").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("intruder_video_badge_0", useUnmergedTree = true).assertIsDisplayed()
+
+        com.example.presentation.screens.intruders.IntruderLogStore.clearAll(context)
+    }
 }

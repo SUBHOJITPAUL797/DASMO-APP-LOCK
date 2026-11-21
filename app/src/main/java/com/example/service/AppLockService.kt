@@ -26,12 +26,14 @@ import com.example.domain.repository.AppLockRepository
 import com.example.domain.repository.LockedAppBackupCodec
 import com.example.presentation.screens.lock.LockActivity
 import com.example.util.SecurePreferences
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.util.concurrent.ConcurrentHashMap
 
 class AppLockService : Service() {
 
@@ -59,8 +61,8 @@ class AppLockService : Service() {
 
     companion object {
         private const val TAG = "AppLockService"
-        val unlockedApps: MutableSet<String> = LockSessionTracker("com.example").unlockedApps
-        val lastBackgroundTime: MutableMap<String, Long> = LockSessionTracker("com.example").lastBackgroundTime
+        val unlockedApps: MutableSet<String> = ConcurrentHashMap.newKeySet()
+        val lastBackgroundTime: MutableMap<String, Long> = ConcurrentHashMap()
 
         @Volatile
         private var activeTracker: LockSessionTracker? = null
@@ -201,14 +203,20 @@ class AppLockService : Service() {
         createNotificationChannel()
         val notification = buildServiceNotification()
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(
-                1,
-                notification,
-                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-            )
-        } else {
-            startForeground(1, notification)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startForeground(
+                    1,
+                    notification,
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                )
+            } else {
+                startForeground(1, notification)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Unable to enter foreground right now: ${e.message}", e)
+            stopSelf()
+            return START_NOT_STICKY
         }
 
         if (!isRunning) {
@@ -242,46 +250,52 @@ class AppLockService : Service() {
         val powerManager = getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager
         serviceScope.launch {
             while (isRunning) {
-                if (powerManager?.isInteractive == false) {
-                    delay(450)
-                    continue
-                }
-
-                val endTime = System.currentTimeMillis()
-                val lookbackMs = if (tracker.currentForegroundPackage == null) 120_000L else 5_000L
-                val beginTime = endTime - lookbackMs
-                val events = usageStatsManager.queryEvents(beginTime, endTime)
-                val event = UsageEvents.Event()
-                var latestPackage = tracker.currentForegroundPackage
-
-                while (events.hasNextEvent()) {
-                    events.getNextEvent(event)
-                    if (event.eventType == UsageEvents.Event.ACTIVITY_RESUMED) {
-                        latestPackage = event.packageName
+                try {
+                    if (powerManager?.isInteractive == false) {
+                        delay(450)
+                        continue
                     }
-                }
 
-                // Fallback after long idle/screen-off when no recent ACTIVITY_RESUMED event fell in the window
-                if (latestPackage == null) {
-                    val stats = usageStatsManager.queryUsageStats(
-                        UsageStatsManager.INTERVAL_DAILY,
-                        endTime - 3_600_000L,
-                        endTime
-                    )
-                    latestPackage = stats?.maxByOrNull { it.lastTimeUsed }?.packageName
-                }
+                    val endTime = System.currentTimeMillis()
+                    val lookbackMs = if (tracker.currentForegroundPackage == null) 120_000L else 5_000L
+                    val beginTime = endTime - lookbackMs
+                    val events = usageStatsManager.queryEvents(beginTime, endTime)
+                    val event = UsageEvents.Event()
+                    var latestPackage = tracker.currentForegroundPackage
 
-                if (latestPackage != null && latestPackage != tracker.currentForegroundPackage) {
-                    val action = tracker.onForegroundAppChanged(
-                        targetPackageName = latestPackage,
-                        lockedPackages = cachedLockedPackages.keys,
-                        settings = currentSettings,
-                        nowMillis = System.currentTimeMillis()
-                    )
-                    if (action is ForegroundAction.RequireLock && Settings.canDrawOverlays(this@AppLockService)) {
-                        val label = resolveAppLabel(action.packageName, action.isUninstallProtection)
-                        launchLockScreen(action.packageName, label, action.isHidden)
+                    while (events.hasNextEvent()) {
+                        events.getNextEvent(event)
+                        if (event.eventType == UsageEvents.Event.ACTIVITY_RESUMED) {
+                            latestPackage = event.packageName
+                        }
                     }
+
+                    // Fallback after long idle/screen-off when no recent ACTIVITY_RESUMED event fell in the window
+                    if (latestPackage == null) {
+                        val stats = usageStatsManager.queryUsageStats(
+                            UsageStatsManager.INTERVAL_DAILY,
+                            endTime - 3_600_000L,
+                            endTime
+                        )
+                        latestPackage = stats?.maxByOrNull { it.lastTimeUsed }?.packageName
+                    }
+
+                    if (latestPackage != null && latestPackage != tracker.currentForegroundPackage) {
+                        val action = tracker.onForegroundAppChanged(
+                            targetPackageName = latestPackage,
+                            lockedPackages = cachedLockedPackages.keys,
+                            settings = currentSettings,
+                            nowMillis = System.currentTimeMillis()
+                        )
+                        if (action is ForegroundAction.RequireLock && Settings.canDrawOverlays(this@AppLockService)) {
+                            val label = resolveAppLabel(action.packageName, action.isUninstallProtection)
+                            launchLockScreen(action.packageName, label, action.isHidden)
+                        }
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "Monitoring tick recovered from error: ${e.message}")
                 }
 
                 delay(350)
@@ -300,15 +314,19 @@ class AppLockService : Service() {
     }
 
     private fun launchLockScreen(targetPackage: String, appLabel: String, isHidden: Boolean) {
-        val intent = Intent(this, LockActivity::class.java).apply {
-            putExtra("TARGET_PACKAGE", targetPackage)
-            putExtra("APP_LABEL", appLabel)
-            putExtra("IS_HIDDEN", isHidden)
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
-                Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                Intent.FLAG_ACTIVITY_SINGLE_TOP
+        try {
+            val intent = Intent(this, LockActivity::class.java).apply {
+                putExtra("TARGET_PACKAGE", targetPackage)
+                putExtra("APP_LABEL", appLabel)
+                putExtra("IS_HIDDEN", isHidden)
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP
+            }
+            startActivity(intent)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to launch lock overlay for $targetPackage: ${e.message}", e)
         }
-        startActivity(intent)
     }
 
     override fun onDestroy() {

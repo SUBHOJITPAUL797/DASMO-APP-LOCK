@@ -72,6 +72,7 @@ data class SettingsDraftState(
     val dynamicTimePinEnabled: Boolean = false,
     val scrambleKeypadEnabled: Boolean = false,
     val breakInSirenEnabled: Boolean = false,
+    val intruderVideoEnabled: Boolean = false,
     val preventScreenshots: Boolean = true,
     val calculatorDisguiseEnabled: Boolean = false,
     val uninstallProtectionEnabled: Boolean = false,
@@ -95,6 +96,7 @@ data class SettingsDraftState(
             dynamicTimePinEnabled != baseline.dynamicTimePinEnabled ||
             scrambleKeypadEnabled != baseline.scrambleKeypadEnabled ||
             breakInSirenEnabled != baseline.breakInSirenEnabled ||
+            intruderVideoEnabled != baseline.intruderVideoEnabled ||
             preventScreenshots != baseline.preventScreenshots ||
             calculatorDisguiseEnabled != baseline.calculatorDisguiseEnabled ||
             uninstallProtectionEnabled != baseline.uninstallProtectionEnabled ||
@@ -126,6 +128,7 @@ data class SettingsDraftState(
                 dynamicTimePinEnabled = settings.dynamicTimePinEnabled,
                 scrambleKeypadEnabled = settings.scrambleKeypadEnabled,
                 breakInSirenEnabled = settings.breakInSirenEnabled,
+                intruderVideoEnabled = settings.intruderVideoEnabled,
                 preventScreenshots = settings.preventScreenshots,
                 calculatorDisguiseEnabled = settings.calculatorDisguiseEnabled,
                 uninstallProtectionEnabled = settings.uninstallProtectionEnabled,
@@ -281,6 +284,7 @@ object SettingsValidator {
                 dynamicTimePinEnabled = draft.dynamicTimePinEnabled,
                 scrambleKeypadEnabled = draft.scrambleKeypadEnabled,
                 breakInSirenEnabled = draft.breakInSirenEnabled,
+                intruderVideoEnabled = draft.intruderVideoEnabled,
                 preventScreenshots = draft.preventScreenshots,
                 calculatorDisguiseEnabled = draft.calculatorDisguiseEnabled,
                 uninstallProtectionEnabled = draft.uninstallProtectionEnabled,

@@ -204,8 +204,12 @@ fun AppEntranceLockScreen(
             BiometricManager.BIOMETRIC_SUCCESS
     }
 
+    val latestSettings by rememberUpdatedState(settings)
+
     LaunchedEffect(stage) {
         if (stage is EntranceStage.Unlocked) {
+            IntruderCameraCapture.stopActiveVideoIfRunning()
+            AlarmAlertHelper.stopBreakInAlarm(activity)
             delay(160)
             onUnlockSuccess()
         }
@@ -226,15 +230,17 @@ fun AppEntranceLockScreen(
                     override fun onAuthenticationFailed() {
                         super.onAuthenticationFailed()
                         val current = stage
+                        val activeSettings = latestSettings
                         val nextFails = current.currentFailedAttempts + 1
-                        takeIntruderSelfie(
+                        IntruderCameraCapture.captureEvidence(
                             activity = activity,
+                            settings = activeSettings,
                             targetPackageName = activity.packageName,
                             targetAppLabel = "DASMO LOCK",
                             authMethodLabel = "Biometric",
                             failedAttemptNumber = nextFails
                         )
-                        if (nextFails >= 3 && settings.breakInSirenEnabled) {
+                        if (nextFails >= 3 && activeSettings.breakInSirenEnabled) {
                             AlarmAlertHelper.playBreakInAlarm(activity)
                         }
                         stage = when (current) {
@@ -782,8 +788,9 @@ fun AppEntranceLockScreen(
                                                 stage = EntranceStage.Unlocked
                                             } else {
                                                 val nextFails = verifyPattern.failedAttempts + 1
-                                                takeIntruderSelfie(
+                                                IntruderCameraCapture.captureEvidence(
                                                     activity = activity,
+                                                    settings = settings,
                                                     targetPackageName = activity.packageName,
                                                     targetAppLabel = "DASMO LOCK",
                                                     authMethodLabel = "Pattern",
@@ -832,8 +839,9 @@ fun AppEntranceLockScreen(
                                                         stage = EntranceStage.Unlocked
                                                     } else {
                                                         val nextFails = verifyPassword.failedAttempts + 1
-                                                        takeIntruderSelfie(
+                                                        IntruderCameraCapture.captureEvidence(
                                                             activity = activity,
+                                                            settings = settings,
                                                             targetPackageName = activity.packageName,
                                                             targetAppLabel = "DASMO LOCK",
                                                             authMethodLabel = "Password",
@@ -875,8 +883,9 @@ fun AppEntranceLockScreen(
                                                     stage = EntranceStage.Unlocked
                                                 } else {
                                                     val nextFails = verifyPassword.failedAttempts + 1
-                                                    takeIntruderSelfie(
+                                                    IntruderCameraCapture.captureEvidence(
                                                         activity = activity,
+                                                        settings = settings,
                                                         targetPackageName = activity.packageName,
                                                         targetAppLabel = "DASMO LOCK",
                                                         authMethodLabel = "Password",
@@ -919,8 +928,9 @@ fun AppEntranceLockScreen(
                                                         stage = EntranceStage.Unlocked
                                                     } else {
                                                         val nextFails = verifyPin.failedAttempts + 1
-                                                        takeIntruderSelfie(
+                                                        IntruderCameraCapture.captureEvidence(
                                                             activity = activity,
+                                                            settings = settings,
                                                             targetPackageName = activity.packageName,
                                                             targetAppLabel = "DASMO LOCK",
                                                             authMethodLabel = "PIN",

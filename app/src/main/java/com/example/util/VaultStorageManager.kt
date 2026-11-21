@@ -129,6 +129,7 @@ object VaultStorageManager {
                 "dynamic_time_pin",
                 "scramble_keypad",
                 "break_in_siren",
+                "intruder_video",
                 "prevent_screenshots",
                 "hidden_apps",
                 "locked_apps_backup"

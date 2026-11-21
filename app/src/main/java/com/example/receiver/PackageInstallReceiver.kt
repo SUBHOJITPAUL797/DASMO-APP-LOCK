@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import com.example.data.db.AppGuardDatabase
 import com.example.domain.repository.AppLockRepository
+import com.example.util.InstalledAppsCache
 import com.example.util.SecurePreferences
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -17,13 +18,21 @@ import kotlinx.coroutines.launch
  */
 class PackageInstallReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action != Intent.ACTION_PACKAGE_ADDED) return
+        val action = intent.action ?: return
+        if (action == Intent.ACTION_PACKAGE_REMOVED || action == Intent.ACTION_PACKAGE_FULLY_REMOVED) {
+            if (!intent.getBooleanExtra(Intent.EXTRA_REPLACING, false)) {
+                InstalledAppsCache.invalidate()
+            }
+            return
+        }
+        if (action != Intent.ACTION_PACKAGE_ADDED) return
         if (intent.getBooleanExtra(Intent.EXTRA_REPLACING, false)) return
 
         val installedPackage = intent.data?.schemeSpecificPart?.trim().orEmpty()
         if (installedPackage.isEmpty() || installedPackage == context.packageName) return
 
         val appContext = context.applicationContext
+        InstalledAppsCache.invalidate()
         val securePrefs = SecurePreferences.getInstance(appContext)
         if (!securePrefs.currentSettings().autoLockNewAppsEnabled) return
 

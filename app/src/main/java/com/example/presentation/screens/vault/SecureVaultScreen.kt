@@ -57,6 +57,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.domain.model.PasswordValidator
@@ -64,10 +65,12 @@ import com.example.domain.model.PatternValidator
 import com.example.domain.model.PinMatchResult
 import com.example.domain.model.PinValidator
 import com.example.domain.model.UnlockMethod
+import com.example.presentation.screens.lock.IntruderCameraCapture
 import com.example.ui.components.Icon3DBadge
 import com.example.ui.components.PatternLockView
 import com.example.ui.components.Tactile3DCard
 import com.example.ui.theme.*
+import com.example.util.AlarmAlertHelper
 import com.example.util.CryptoManager
 import com.example.util.MasterKeyManager
 import com.example.util.SecurePreferences
@@ -415,17 +418,36 @@ fun SecureVaultScreen(
                             } else {
                                 when (PinValidator.verifyVaultPin(updated, settings)) {
                                     PinMatchResult.MasterMatch -> {
+                                        IntruderCameraCapture.stopActiveVideoIfRunning()
+                                        AlarmAlertHelper.stopBreakInAlarm(context)
                                         accessState = VaultAccessState.Unlocked(mode = VaultMode.REAL, isLoading = true)
                                         reloadVaultItems(VaultMode.REAL)
                                     }
                                     PinMatchResult.DecoyMatch -> {
+                                        IntruderCameraCapture.stopActiveVideoIfRunning()
+                                        AlarmAlertHelper.stopBreakInAlarm(context)
                                         accessState = VaultAccessState.Unlocked(mode = VaultMode.DECOY, isLoading = true)
                                         reloadVaultItems(VaultMode.DECOY)
                                     }
                                     PinMatchResult.Mismatch -> {
+                                        val nextFails = currentAccess.failedAttempts + 1
+                                        (context as? FragmentActivity)?.let { hostActivity ->
+                                            IntruderCameraCapture.captureEvidence(
+                                                activity = hostActivity,
+                                                settings = settings,
+                                                targetPackageName = context.packageName,
+                                                targetAppLabel = "Secure Vault",
+                                                authMethodLabel = "PIN",
+                                                failedAttemptNumber = nextFails
+                                            )
+                                        }
+                                        if (nextFails >= 3 && settings.breakInSirenEnabled) {
+                                            AlarmAlertHelper.playBreakInAlarm(context)
+                                        }
                                         accessState = currentAccess.copy(
                                             enteredPin = "",
-                                            errorMessage = "Incorrect PIN. Access Denied."
+                                            failedAttempts = nextFails,
+                                            errorMessage = "Incorrect PIN (Attempt $nextFails)"
                                         )
                                     }
                                 }
@@ -445,12 +467,29 @@ fun SecureVaultScreen(
                             errorMessage = "Connect at least ${PatternValidator.MIN_NODES} dots"
                         )
                     } else if (PinValidator.verifyAppUnlockPattern(nodes, settings)) {
+                        IntruderCameraCapture.stopActiveVideoIfRunning()
+                        AlarmAlertHelper.stopBreakInAlarm(context)
                         accessState = VaultAccessState.Unlocked(mode = VaultMode.REAL, isLoading = true)
                         reloadVaultItems(VaultMode.REAL)
                     } else {
+                        val nextFails = currentAccess.failedAttempts + 1
+                        (context as? FragmentActivity)?.let { hostActivity ->
+                            IntruderCameraCapture.captureEvidence(
+                                activity = hostActivity,
+                                settings = settings,
+                                targetPackageName = context.packageName,
+                                targetAppLabel = "Secure Vault",
+                                authMethodLabel = "Pattern",
+                                failedAttemptNumber = nextFails
+                            )
+                        }
+                        if (nextFails >= 3 && settings.breakInSirenEnabled) {
+                            AlarmAlertHelper.playBreakInAlarm(context)
+                        }
                         accessState = currentAccess.copy(
                             patternAttemptCount = currentAccess.patternAttemptCount + 1,
-                            errorMessage = "Incorrect Pattern. Access Denied."
+                            failedAttempts = nextFails,
+                            errorMessage = "Incorrect Pattern (Attempt $nextFails)"
                         )
                     }
                 },
@@ -465,12 +504,29 @@ fun SecureVaultScreen(
                 },
                 onPasswordSubmit = {
                     if (PinValidator.verifyAppUnlockPassword(currentAccess.enteredPassword, settings)) {
+                        IntruderCameraCapture.stopActiveVideoIfRunning()
+                        AlarmAlertHelper.stopBreakInAlarm(context)
                         accessState = VaultAccessState.Unlocked(mode = VaultMode.REAL, isLoading = true)
                         reloadVaultItems(VaultMode.REAL)
                     } else {
+                        val nextFails = currentAccess.failedAttempts + 1
+                        (context as? FragmentActivity)?.let { hostActivity ->
+                            IntruderCameraCapture.captureEvidence(
+                                activity = hostActivity,
+                                settings = settings,
+                                targetPackageName = context.packageName,
+                                targetAppLabel = "Secure Vault",
+                                authMethodLabel = "Password",
+                                failedAttemptNumber = nextFails
+                            )
+                        }
+                        if (nextFails >= 3 && settings.breakInSirenEnabled) {
+                            AlarmAlertHelper.playBreakInAlarm(context)
+                        }
                         accessState = currentAccess.copy(
                             enteredPassword = "",
-                            errorMessage = "Incorrect Password. Access Denied."
+                            failedAttempts = nextFails,
+                            errorMessage = "Incorrect Password (Attempt $nextFails)"
                         )
                     }
                 },
@@ -488,6 +544,8 @@ fun SecureVaultScreen(
                     val isMaster = MasterKeyManager.isMasterKey(input)
                     val isAnswer = securePrefs.verifySecurityAnswer(input)
                     if (isMaster || isAnswer) {
+                        IntruderCameraCapture.stopActiveVideoIfRunning()
+                        AlarmAlertHelper.stopBreakInAlarm(context)
                         recoveryState = VaultRecoveryState.Hidden
                         accessState = VaultAccessState.Unlocked(mode = VaultMode.REAL, isLoading = true)
                         reloadVaultItems(VaultMode.REAL)

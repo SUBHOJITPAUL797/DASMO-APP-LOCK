@@ -62,6 +62,7 @@ data class SecuritySettings(
     val dynamicTimePinEnabled: Boolean = false,
     val scrambleKeypadEnabled: Boolean = false,
     val breakInSirenEnabled: Boolean = false,
+    val intruderVideoEnabled: Boolean = false,
     val preventScreenshots: Boolean = true,
     val calculatorDisguiseEnabled: Boolean = false,
     val uninstallProtectionEnabled: Boolean = false,

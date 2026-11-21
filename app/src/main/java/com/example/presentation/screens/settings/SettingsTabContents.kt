@@ -669,6 +669,18 @@ internal fun SecurityCategoryContent(
     )
 
     TactileSettingSwitchCard(
+        icon = Icons.Default.Videocam,
+        title = "Intruder Video Capture (3+ Fails)",
+        description = "Silently records an 8-second front-camera video clip in Intruder Vault after 3 consecutive wrong attempts instead of a still photo.",
+        checked = draft.intruderVideoEnabled,
+        badgeText = if (draft.intruderVideoEnabled) "8s Video Trap" else null,
+        accentStart = Color(0xFFEC4899),
+        accentEnd = Color(0xFF9D174D),
+        testTag = "switch_intruder_video",
+        onCheckedChange = { onDraftChange(draft.copy(intruderVideoEnabled = it)) }
+    )
+
+    TactileSettingSwitchCard(
         icon = Icons.Default.AdminPanelSettings,
         title = "Uninstall Protection",
         description = "Blocks Package Installer & Android Settings with your Master PIN and activates Device Admin to stop force-stop or uninstall.",
